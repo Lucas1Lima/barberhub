@@ -211,15 +211,33 @@ class ProfessionalIn(BaseModel):
     fixed_fee: float = 0.0
 
 
+class ProfessionalPatch(BaseModel):
+    name: Optional[str] = None
+    role: Optional[str] = None
+    chair_rental: Optional[bool] = None
+    fixed_fee: Optional[float] = None
+
+
 class ServiceIn(BaseModel):
     name: str
     price: float = Field(gt=0)
     duration_min: int = Field(gt=0, default=30)
 
 
+class ServicePatch(BaseModel):
+    name: Optional[str] = None
+    price: Optional[float] = Field(default=None, gt=0)
+    duration_min: Optional[int] = Field(default=None, gt=0)
+
+
 class ClientIn(BaseModel):
     name: str
     phone: str = ""
+
+
+class ClientPatch(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
 
 
 class CommissionRuleIn(BaseModel):
@@ -330,6 +348,18 @@ def list_professionals(shop_id: int = Depends(current_shop)):
         return [dict(r) for r in rows]
 
 
+@app.patch("/professionals/{prof_id}")
+def update_professional(prof_id: int, body: ProfessionalPatch, shop_id: int = Depends(current_shop)):
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(422, "Nada para atualizar")
+    with db() as conn:
+        _get_scoped(conn, "professionals", prof_id, shop_id, "Profissional")
+        sets = ", ".join(f"{k}=?" for k in data)
+        conn.execute(f"UPDATE professionals SET {sets} WHERE id=?", (*data.values(), prof_id))
+        return _get_scoped(conn, "professionals", prof_id, shop_id, "Profissional")
+
+
 # ---------------------------------------------------------------- services
 @app.post("/services")
 def create_service(body: ServiceIn, shop_id: int = Depends(current_shop)):
@@ -347,6 +377,18 @@ def list_services(shop_id: int = Depends(current_shop)):
         return [dict(r) for r in rows]
 
 
+@app.patch("/services/{svc_id}")
+def update_service(svc_id: int, body: ServicePatch, shop_id: int = Depends(current_shop)):
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(422, "Nada para atualizar")
+    with db() as conn:
+        _get_scoped(conn, "services", svc_id, shop_id, "Serviço")
+        sets = ", ".join(f"{k}=?" for k in data)
+        conn.execute(f"UPDATE services SET {sets} WHERE id=?", (*data.values(), svc_id))
+        return _get_scoped(conn, "services", svc_id, shop_id, "Serviço")
+
+
 # ---------------------------------------------------------------- clients
 @app.post("/clients")
 def create_client(body: ClientIn, shop_id: int = Depends(current_shop)):
@@ -361,6 +403,18 @@ def list_clients(shop_id: int = Depends(current_shop)):
     with db() as conn:
         rows = conn.execute("SELECT * FROM clients WHERE shop_id=?", (shop_id,)).fetchall()
         return [dict(r) for r in rows]
+
+
+@app.patch("/clients/{cli_id}")
+def update_client(cli_id: int, body: ClientPatch, shop_id: int = Depends(current_shop)):
+    data = body.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(422, "Nada para atualizar")
+    with db() as conn:
+        _get_scoped(conn, "clients", cli_id, shop_id, "Cliente")
+        sets = ", ".join(f"{k}=?" for k in data)
+        conn.execute(f"UPDATE clients SET {sets} WHERE id=?", (*data.values(), cli_id))
+        return _get_scoped(conn, "clients", cli_id, shop_id, "Cliente")
 
 
 @app.get("/clients/{client_id}/history")
@@ -527,6 +581,44 @@ def add_cash_entry(body: CashEntryIn, shop_id: int = Depends(current_shop)):
             "INSERT INTO cash_entries (shop_id, day, kind, description, amount) VALUES (?,?,?,?,?)",
             (shop_id, body.day, body.kind, body.description, body.amount))
         return {**body.model_dump(), "id": cur.lastrowid, "shop_id": shop_id}
+
+
+@app.delete("/cash-entries/{entry_id}")
+def delete_cash_entry(entry_id: int, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "cash_entries", entry_id, shop_id, "Lançamento")
+        conn.execute("DELETE FROM cash_entries WHERE id=?", (entry_id,))
+    return {"ok": True}
+
+
+@app.get("/reports/cash-month")
+def cash_month(year: int, month: int, shop_id: int = Depends(current_shop)):
+    """Mapa do mês: por dia, entradas e saídas (serviços concluídos + manuais) — para o calendário."""
+    if not (1 <= month <= 12):
+        raise HTTPException(422, "month deve ser 1-12")
+    prefix = f"{year:04d}-{month:02d}-"
+    with db() as conn:
+        svc_rows = conn.execute(
+            """SELECT substr(concluded_at,1,10) AS d, SUM(price) AS total
+               FROM appointments WHERE shop_id=? AND status='concluido' AND concluded_at LIKE ?
+               GROUP BY d""", (shop_id, prefix + "%")).fetchall()
+        manual_rows = conn.execute(
+            """SELECT day AS d,
+                      SUM(CASE WHEN kind='income' THEN amount ELSE 0 END) AS inc,
+                      SUM(CASE WHEN kind='expense' THEN amount ELSE 0 END) AS exp
+               FROM cash_entries WHERE shop_id=? AND day LIKE ?
+               GROUP BY day""", (shop_id, prefix + "%")).fetchall()
+        days: dict[str, dict] = {}
+        for r in svc_rows:
+            days.setdefault(r["d"], {"income": 0.0, "expense": 0.0})
+            days[r["d"]]["income"] += round(r["total"], 2)
+        for r in manual_rows:
+            days.setdefault(r["d"], {"income": 0.0, "expense": 0.0})
+            days[r["d"]]["income"] += round(r["inc"], 2)
+            days[r["d"]]["expense"] += round(r["exp"], 2)
+        return {"year": year, "month": month,
+                "days": {d: {"income": round(v["income"], 2), "expense": round(v["expense"], 2)}
+                         for d, v in sorted(days.items())}}
 
 
 @app.get("/health")
