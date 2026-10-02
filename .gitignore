@@ -1,0 +1,4 @@
+__pycache__/
+barberhub.db
+.secret
+*.pyc
