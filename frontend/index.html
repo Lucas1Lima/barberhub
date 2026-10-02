@@ -86,6 +86,8 @@ nav .ic{font-size:20px}
 .entry{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
 .entry:last-child{border:0}
 .entry .amt.in{color:var(--green)}.entry .amt.out{color:var(--red)}
+.callout-ok{background:#123527;border:1px solid var(--green);color:var(--green);padding:10px;border-radius:10px;font-size:13px}
+.callout-warn{background:#3a2f12;border:1px solid var(--gold);color:var(--gold2);padding:10px;border-radius:10px;font-size:12px;word-break:break-all}
 </style>
 </head>
 <body>
@@ -182,6 +184,35 @@ nav .ic{font-size:20px}
       <label>WhatsApp</label><input id="cliPhone" placeholder="13 99123-4567">
       <button class="btn" onclick="addCli()">Adicionar</button>
     </div>
+    <div class="card">
+      <h3>Minha conta</h3>
+      <label>Trocar email (confirme com a senha)</label>
+      <input id="accEmail" type="email" placeholder="novo@email.com">
+      <input id="accEmailPass" type="password" placeholder="senha atual" style="margin-top:6px">
+      <button class="btn" onclick="changeEmail()">Salvar email</button>
+      <label style="margin-top:14px">Trocar senha</label>
+      <input id="accOldPass" type="password" placeholder="senha atual">
+      <input id="accNewPass" type="password" placeholder="nova senha (6+)" style="margin-top:6px">
+      <button class="btn" onclick="changePass()">Salvar senha</button>
+    </div>
+  </section>
+
+  <section class="view" id="v-admin">
+    <div class="card">
+      <h3>Lojas cadastradas</h3>
+      <div id="adminShops"><div class="empty">Carregando…</div></div>
+    </div>
+    <div class="card">
+      <h3>Convidar cliente (acesso por email)</h3>
+      <label>Email do comprador</label><input id="invEmail" type="email" placeholder="cliente@email.com">
+      <label>Nome da barbearia (opcional)</label><input id="invShop" placeholder="Ex.: Barbearia do Zé">
+      <button class="btn" onclick="createInvite()">Gerar convite (48h)</button>
+      <div id="invResult" style="margin-top:10px"></div>
+    </div>
+    <div class="card">
+      <h3>Convites enviados</h3>
+      <div id="invList"><div class="empty">—</div></div>
+    </div>
   </section>
 </main>
 
@@ -195,11 +226,37 @@ nav .ic{font-size:20px}
   </div>
 </div>
 
+<!-- convite / reset (telas públicas) -->
+<div id="inviteScreen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:210;align-items:center;justify-content:center;padding:16px">
+  <div style="width:100%;max-width:380px">
+    <h1 style="font-size:26px;font-weight:800;text-align:center;margin-bottom:4px">Barber<span style="color:var(--gold)">Hub</span></h1>
+    <div class="card">
+      <h3 id="invTitle">Ativar seu acesso</h3>
+      <p style="font-size:13px;color:var(--mut);margin-bottom:8px" id="invInfo">—</p>
+      <label>Defina sua senha (6+)</label>
+      <input id="invPass" type="password" placeholder="mínimo 6 caracteres">
+      <button class="btn" onclick="acceptInvite()">Ativar e entrar</button>
+    </div>
+  </div>
+</div>
+<div id="resetScreen" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:210;align-items:center;justify-content:center;padding:16px">
+  <div style="width:100%;max-width:380px">
+    <h1 style="font-size:26px;font-weight:800;text-align:center;margin-bottom:4px">Barber<span style="color:var(--gold)">Hub</span></h1>
+    <div class="card">
+      <h3>Redefinir senha</h3>
+      <label>Nova senha (6+)</label>
+      <input id="resetPass" type="password" placeholder="mínimo 6 caracteres">
+      <button class="btn" onclick="doReset()">Salvar senha</button>
+    </div>
+  </div>
+</div>
+
 <nav>
   <button class="on" data-v="v-agenda" onclick="nav('v-agenda',this)"><span class="ic">📅</span>Agenda</button>
   <button data-v="v-caixa" onclick="nav('v-caixa',this)"><span class="ic">💰</span>Caixa</button>
   <button data-v="v-comissao" onclick="nav('v-comissao',this)"><span class="ic">✂️</span>Comissão</button>
   <button data-v="v-config" onclick="nav('v-config',this)"><span class="ic">⚙️</span>Ajustes</button>
+  <button id="navAdmin" style="display:none" data-v="v-admin" onclick="nav('v-admin',this)"><span class="ic">🛡️</span>Admin</button>
 </nav>
 
 <div class="modal" id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;align-items:center;justify-content:center;padding:16px">
@@ -327,11 +384,13 @@ async function start(){
   const me = await api('/auth/me');
   SHOP = me.id;
   document.getElementById('shopName').textContent = me.name;
+  document.getElementById('navAdmin').style.display = me.is_admin ? 'block' : 'none';
   hideLogin();
   const now = new Date();
   CAL_Y = now.getFullYear(); CAL_M = now.getMonth() + 1;
   await reloadBase();
   refreshDayBar(); loadAll();
+  if(me.is_admin) loadAdmin();
 }
 
 async function boot(){
@@ -582,7 +641,119 @@ async function saveAp(){
   finally{ btn.disabled = false; }
 }
 
+// ---------------- conta: trocar email e senha
+async function changeEmail(){
+  const email = document.getElementById('accEmail').value.trim();
+  const pass = document.getElementById('accEmailPass').value;
+  if(!email || !pass) return toast('Preencha novo email e senha atual');
+  try{
+    await api('/auth/email', {method:'PATCH', body: JSON.stringify({new_email: email, password: pass})});
+    document.getElementById('accEmail').value=''; document.getElementById('accEmailPass').value='';
+    toast('Email atualizado! Use-o no próximo login');
+    const me = await api('/auth/me'); document.getElementById('shopName').textContent = me.name;
+  }catch(e){ toast(e.message); }
+}
+async function changePass(){
+  const oldP = document.getElementById('accOldPass').value;
+  const newP = document.getElementById('accNewPass').value;
+  if(!oldP || newP.length < 6) return toast('Preencha senha atual e nova (6+)');
+  try{
+    await api('/auth/password', {method:'PATCH', body: JSON.stringify({old_password: oldP, new_password: newP})});
+    document.getElementById('accOldPass').value=''; document.getElementById('accNewPass').value='';
+    toast('Senha atualizada!');
+  }catch(e){ toast(e.message); }
+}
+
+// ---------------- admin
+async function loadAdmin(){
+  try{
+    const shops = await api('/admin/shops');
+    document.getElementById('adminShops').innerHTML = shops.map(s=>`
+      <div class="rep-line"><span><b style="color:var(--txt)">${esc(s.name)}</b>${s.is_admin?' 🛡️':''}${s.active?'':' ⛔'}<br>
+        <small style="color:var(--mut)">${esc(s.owner_email)} · ${s.appointments} agend. (${s.appts_30d} em 30d)<br>
+        criada ${s.created_at.slice(0,10)} · último login ${s.last_login?s.last_login.slice(0,10):'nunca'}</small></span>
+      <span style="display:flex;gap:6px">
+        <button class="iconbtn" onclick="toggleShop(${s.id},${s.active?0:1})">${s.active?'⛔':'▶️'}</button>
+        <button class="iconbtn" onclick="resetShopPass(${s.id})">🔑</button>
+      </span></div>`).join('');
+    const invs = await api('/admin/invites');
+    document.getElementById('invList').innerHTML = invs.length ? invs.map(i=>`
+      <div class="rep-line"><span>${esc(i.email)}<br><small style="color:var(--mut)">${i.used_at?'usado '+i.used_at.slice(0,10):'expira '+i.expires_at.slice(0,16).replace('T',' ')}</small></span>
+      <span>${i.used_at?'<span class="tag concluido">ativo</span>':'<span class="tag agendado">pendente</span>'}</span></div>`).join('')
+      : '<div class="empty">Nenhum convite ainda</div>';
+  }catch(e){ toast(e.message); }
+}
+async function toggleShop(id, active){
+  try{
+    await api(`/admin/shops/${id}`, {method:'PATCH', body: JSON.stringify({active})});
+    loadAdmin(); toast(active?'Conta reativada':'Conta desativada');
+  }catch(e){ toast(e.message); }
+}
+async function resetShopPass(id){
+  try{
+    const r = await api(`/admin/shops/${id}/reset-password`, {method:'POST'});
+    prompt('Senha temporária (passe ao cliente):', r.temporary_password);
+  }catch(e){ toast(e.message); }
+}
+async function createInvite(){
+  const email = document.getElementById('invEmail').value.trim();
+  const shopName = document.getElementById('invShop').value.trim();
+  if(!email) return toast('Informe o email');
+  try{
+    const r = await api('/admin/invites', {method:'POST', body: JSON.stringify({email, shop_name: shopName})});
+    document.getElementById('invResult').innerHTML = r.sent
+      ? `<div class="callout-ok">✉️ Convite enviado para ${esc(email)} (expira ${r.expires_at.slice(0,16).replace('T',' ')})</div>`
+      : `<div class="callout-warn">SMTP não configurado — copie o link e envie manualmente:<br><input value="${esc(r.link)}" readonly onclick="this.select()" style="margin-top:6px"></div>`;
+    loadAdmin();
+  }catch(e){ toast(e.message); }
+}
+
+// ---------------- convite / reset públicos (via URL)
+async function checkUrlFlow(){
+  const params = new URLSearchParams(location.search);
+  const invToken = params.get('invite');
+  const resetToken = params.get('reset');
+  if(invToken){
+    try{
+      const info = await fetch(API+`/auth/invite/${invToken}`).then(r=>{ if(!r.ok) throw 0; return r.json(); });
+      window.INVITE_TOKEN = invToken;
+      document.getElementById('invInfo').textContent = `${info.email} — ${info.shop_name}`;
+      document.getElementById('inviteScreen').style.display = 'flex';
+    }catch(e){ toast('Convite inválido ou expirado'); }
+  } else if(resetToken){
+    window.RESET_TOKEN = resetToken;
+    document.getElementById('resetScreen').style.display = 'flex';
+  }
+}
+async function acceptInvite(){
+  const pass = document.getElementById('invPass').value;
+  if(pass.length < 6) return toast('Senha precisa de 6+ caracteres');
+  try{
+    const r = await fetch(API+'/auth/invite/accept', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token: window.INVITE_TOKEN, password: pass})});
+    if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || 'Erro'); }
+    TOKEN = r.token; localStorage.setItem('bh_token', TOKEN);
+    document.getElementById('inviteScreen').style.display = 'none';
+    history.replaceState(null, '', location.pathname);
+    await start();
+  }catch(e){ toast(e.message); }
+}
+async function doReset(){
+  const pass = document.getElementById('resetPass').value;
+  if(pass.length < 6) return toast('Senha precisa de 6+ caracteres');
+  try{
+    const r = await fetch(API+'/auth/reset-password', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({token: window.RESET_TOKEN, new_password: pass})});
+    if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || 'Erro'); }
+    document.getElementById('resetScreen').style.display = 'none';
+    history.replaceState(null, '', location.pathname);
+    toast('Senha redefinida! Faça login');
+    showLogin();
+  }catch(e){ toast(e.message); }
+}
+
 boot();
+checkUrlFlow();
 </script>
 </body>
 </html>

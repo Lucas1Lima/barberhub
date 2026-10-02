@@ -71,7 +71,26 @@ CREATE TABLE IF NOT EXISTS shops (
     name TEXT NOT NULL,
     owner_email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    is_admin INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 1,
+    last_login TEXT
+);
+CREATE TABLE IF NOT EXISTS invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    shop_name TEXT NOT NULL DEFAULT '',
+    expires_at TEXT NOT NULL,
+    used_at TEXT,
+    created_by INTEGER NOT NULL REFERENCES shops(id)
+);
+CREATE TABLE IF NOT EXISTS password_resets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    token TEXT UNIQUE NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
 );
 CREATE TABLE IF NOT EXISTS professionals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,6 +152,17 @@ def _migrate():
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(appointments)").fetchall()]
         if "concluded_at" not in cols:
             conn.execute("ALTER TABLE appointments ADD COLUMN concluded_at TEXT")
+        # migração v0.5: colunas admin/ativo/último login em shops
+        shop_cols = [r["name"] for r in conn.execute("PRAGMA table_info(shops)").fetchall()]
+        if "is_admin" not in shop_cols:
+            conn.execute("ALTER TABLE shops ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        if "active" not in shop_cols:
+            conn.execute("ALTER TABLE shops ADD COLUMN active INTEGER NOT NULL DEFAULT 1")
+        if "last_login" not in shop_cols:
+            conn.execute("ALTER TABLE shops ADD COLUMN last_login TEXT")
+        # 1º usuário registrado vira admin automaticamente (se ainda não houver admin)
+        if not conn.execute("SELECT 1 FROM shops WHERE is_admin=1").fetchone():
+            conn.execute("UPDATE shops SET is_admin=1 WHERE id=(SELECT MIN(id) FROM shops)")
 
 
 _migrate()
@@ -149,7 +179,7 @@ def _make_token(shop_id: int) -> str:
 
 
 def current_shop(authorization: str = Header(default="")) -> int:
-    """Dependency: extrai shop_id do token Bearer."""
+    """Dependency: extrai shop_id do token Bearer e exige conta ativa."""
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Faça login para continuar")
     token = authorization[7:]
@@ -157,7 +187,12 @@ def current_shop(authorization: str = Header(default="")) -> int:
         data = jwt.decode(token, _SECRET, algorithms=["HS256"])
     except JWTError:
         raise HTTPException(401, "Sessão expirada — faça login novamente")
-    return int(data["shop_id"])
+    shop_id = int(data["shop_id"])
+    with db() as conn:
+        row = conn.execute("SELECT active FROM shops WHERE id=?", (shop_id,)).fetchone()
+    if not row or not row["active"]:
+        raise HTTPException(403, "Conta desativada — fale com o suporte")
+    return shop_id
 
 
 class AuthIn(BaseModel):
@@ -181,6 +216,9 @@ def register(body: AuthIn):
         except sqlite3.IntegrityError:
             raise HTTPException(409, "Este email já tem conta — faça login")
         shop_id = cur.lastrowid
+        # 1º usuário da plataforma vira admin
+        if not conn.execute("SELECT 1 FROM shops WHERE is_admin=1").fetchone():
+            conn.execute("UPDATE shops SET is_admin=1 WHERE id=?", (shop_id,))
     return {"shop_id": shop_id, "token": _make_token(shop_id), "shop_name": body.shop_name or "Minha Barbearia"}
 
 
@@ -188,19 +226,255 @@ def register(body: AuthIn):
 def login(body: AuthIn):
     email = body.email.strip().lower()
     with db() as conn:
-        row = conn.execute("SELECT id, password_hash FROM shops WHERE owner_email=?", (email,)).fetchone()
+        row = conn.execute("SELECT id, password_hash, active FROM shops WHERE owner_email=?", (email,)).fetchone()
     if not row or not _pwd.verify(body.password, row["password_hash"]):
         raise HTTPException(401, "Email ou senha incorretos")
+    if not row["active"]:
+        raise HTTPException(403, "Conta desativada — fale com o suporte")
+    with db() as conn:
+        conn.execute("UPDATE shops SET last_login=? WHERE id=?", (_now().isoformat(), row["id"]))
     return {"shop_id": row["id"], "token": _make_token(row["id"])}
 
 
 @app.get("/auth/me")
 def me(shop_id: int = Depends(current_shop)):
     with db() as conn:
-        row = conn.execute("SELECT id, name, owner_email FROM shops WHERE id=?", (shop_id,)).fetchone()
+        row = conn.execute("SELECT id, name, owner_email, is_admin FROM shops WHERE id=?", (shop_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Conta não encontrada")
     return dict(row)
+
+
+class ChangeEmailIn(BaseModel):
+    new_email: str
+    password: str
+
+
+@app.patch("/auth/email")
+def change_email(body: ChangeEmailIn, shop_id: int = Depends(current_shop)):
+    new_email = body.new_email.strip().lower()
+    if "@" not in new_email:
+        raise HTTPException(422, "Email inválido")
+    with db() as conn:
+        row = conn.execute("SELECT password_hash FROM shops WHERE id=?", (shop_id,)).fetchone()
+        if not _pwd.verify(body.password, row["password_hash"]):
+            raise HTTPException(401, "Senha incorreta")
+        if conn.execute("SELECT 1 FROM shops WHERE owner_email=?", (new_email,)).fetchone():
+            raise HTTPException(409, "Este email já está em uso")
+        try:
+            conn.execute("UPDATE shops SET owner_email=? WHERE id=?", (new_email, shop_id))
+        except sqlite3.IntegrityError:
+            raise HTTPException(409, "Este email já está em uso")
+    return {"ok": True, "email": new_email}
+
+
+class ChangePassIn(BaseModel):
+    old_password: str
+    new_password: str = Field(min_length=6)
+
+
+@app.patch("/auth/password")
+def change_password(body: ChangePassIn, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        row = conn.execute("SELECT password_hash FROM shops WHERE id=?", (shop_id,)).fetchone()
+        if not _pwd.verify(body.old_password, row["password_hash"]):
+            raise HTTPException(401, "Senha atual incorreta")
+        conn.execute("UPDATE shops SET password_hash=? WHERE id=?", (_pwd.hash(body.new_password), shop_id))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- recuperação de senha (token de 1 uso)
+import secrets as _secrets_mod
+
+
+def _send_email(to: str, subject: str, body_text: str) -> bool:
+    """Envia email via SMTP se configurado (SMTP_HOST/SMTP_USER/SMTP_PASS/SMTP_FROM).
+    Sem SMTP configurado, registra no log do servidor (modo dev)."""
+    host = os.environ.get("SMTP_HOST")
+    if not host:
+        print(f"[EMAIL-> {to}] {subject}: {body_text[:120]}")
+        return False
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        user = os.environ.get("SMTP_USER", "")
+        msg = MIMEText(body_text, "plain", "utf-8")
+        msg["Subject"] = subject
+        msg["From"] = os.environ.get("SMTP_FROM", user)
+        msg["To"] = to
+        port = int(os.environ.get("SMTP_PORT", "587"))
+        with smtplib.SMTP(host, port, timeout=15) as s:
+            s.starttls()
+            if user:
+                s.login(user, os.environ.get("SMTP_PASS", ""))
+            s.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"[EMAIL ERRO -> {to}] {e}")
+        return False
+
+
+def _base_url() -> str:
+    return os.environ.get("BARBERHUB_ORIGIN", "http://localhost:8000").rstrip("/")
+
+
+class ResetRequestIn(BaseModel):
+    email: str
+
+
+@app.post("/auth/forgot-password")
+def forgot_password(body: ResetRequestIn):
+    email = body.email.strip().lower()
+    with db() as conn:
+        row = conn.execute("SELECT id FROM shops WHERE owner_email=?", (email,)).fetchone()
+        if row:
+            token = _secrets_mod.token_urlsafe(24)
+            expires = (_now() + timedelta(hours=1)).isoformat()
+            conn.execute("INSERT INTO password_resets (email, token, expires_at) VALUES (?,?,?)",
+                         (email, token, expires))
+            link = f"{_base_url()}/reset?token={token}"
+            sent = _send_email(email, "BarberHub — redefinir senha",
+                               f"Redefina sua senha em 1 hora: {link}\nSe não foi você, ignore este email.")
+            return {"ok": True, "sent": sent, "link": link if not sent else None}
+    # resposta igual com ou sem conta (não revela quais emails existem)
+    return {"ok": True, "sent": False, "link": None}
+
+
+class ResetIn(BaseModel):
+    token: str
+    new_password: str = Field(min_length=6)
+
+
+@app.post("/auth/reset-password")
+def reset_password(body: ResetIn):
+    with db() as conn:
+        row = conn.execute(
+            "SELECT email, expires_at, used_at FROM password_resets WHERE token=?", (body.token,)).fetchone()
+        if not row or row["used_at"] or row["expires_at"] < _now().isoformat():
+            raise HTTPException(422, "Token inválido ou expirado")
+        conn.execute("UPDATE password_resets SET used_at=? WHERE token=?", (_now().isoformat(), body.token))
+        conn.execute("UPDATE shops SET password_hash=? WHERE owner_email=?",
+                     (_pwd.hash(body.new_password), row["email"]))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- admin
+def require_admin(shop_id: int = Depends(current_shop)) -> int:
+    with db() as conn:
+        row = conn.execute("SELECT is_admin FROM shops WHERE id=?", (shop_id,)).fetchone()
+    if not row or not row["is_admin"]:
+        raise HTTPException(403, "Acesso restrito ao administrador")
+    return shop_id
+
+
+@app.get("/admin/shops")
+def admin_list_shops(admin_id: int = Depends(require_admin)):
+    with db() as conn:
+        rows = conn.execute("""
+            SELECT s.id, s.name, s.owner_email, s.created_at, s.active, s.last_login, s.is_admin,
+                   (SELECT COUNT(*) FROM appointments a WHERE a.shop_id = s.id) AS appointments,
+                   (SELECT COUNT(*) FROM appointments a WHERE a.shop_id = s.id AND a.created_at >= datetime('now','-30 day')) AS appts_30d
+            FROM shops s ORDER BY s.id""").fetchall()
+        return [dict(r) for r in rows]
+
+
+class ShopAdminPatch(BaseModel):
+    active: Optional[bool] = None
+    make_admin: Optional[bool] = None
+
+
+@app.patch("/admin/shops/{shop_id}")
+def admin_patch_shop(shop_id: int, body: ShopAdminPatch, admin_id: int = Depends(require_admin)):
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM shops WHERE id=?", (shop_id,)).fetchone():
+            raise HTTPException(404, f"Loja {shop_id} não encontrada")
+        if body.active is not None:
+            if shop_id == admin_id and not body.active:
+                raise HTTPException(422, "Você não pode desativar sua própria conta")
+            conn.execute("UPDATE shops SET active=? WHERE id=?", (int(body.active), shop_id))
+        if body.make_admin is not None:
+            conn.execute("UPDATE shops SET is_admin=? WHERE id=?", (int(body.make_admin), shop_id))
+        return dict(conn.execute("SELECT * FROM shops WHERE id=?", (shop_id,)).fetchone())
+
+
+@app.post("/admin/shops/{shop_id}/reset-password")
+def admin_reset_password(shop_id: int, admin_id: int = Depends(require_admin)):
+    """Gera senha temporária e a retorna para o admin passar ao cliente."""
+    import secrets as _s
+    temp = _s.token_urlsafe(6)   # ex.: "aB3xY_9Q" — fácil de digitar
+    with db() as conn:
+        if not conn.execute("SELECT 1 FROM shops WHERE id=?", (shop_id,)).fetchone():
+            raise HTTPException(404, f"Loja {shop_id} não encontrada")
+        conn.execute("UPDATE shops SET password_hash=? WHERE id=?", (_pwd.hash(temp), shop_id))
+    return {"temporary_password": temp}
+
+
+# ---------------------------------------------------------------- convites (infoproduto: acesso temporário por email)
+class InviteIn(BaseModel):
+    email: str
+    shop_name: str = ""
+
+
+@app.post("/admin/invites")
+def admin_create_invite(body: InviteIn, admin_id: int = Depends(require_admin)):
+    """Cria convite de 48h: link único que registra a conta com o email já definido."""
+    email = body.email.strip().lower()
+    if "@" not in email:
+        raise HTTPException(422, "Email inválido")
+    token = _secrets_mod.token_urlsafe(24)
+    expires = (_now() + timedelta(hours=48)).isoformat()
+    with db() as conn:
+        if conn.execute("SELECT 1 FROM shops WHERE owner_email=?", (email,)).fetchone():
+            raise HTTPException(409, "Este email já tem conta")
+        cur = conn.execute(
+            "INSERT INTO invites (email, token, shop_name, expires_at, created_by) VALUES (?,?,?,?,?)",
+            (email, token, body.shop_name or "Minha Barbearia", expires, admin_id))
+        invite_id = cur.lastrowid
+    link = f"{_base_url()}/invite?token={token}"
+    sent = _send_email(email, "Seu acesso ao BarberHub",
+                       f"Bem-vindo! Ative seu acesso em 48 horas: {link}\n"
+                       f"Depois de ativar, defina sua senha e (se quiser) troque o email de acesso.")
+    return {"id": invite_id, "email": email, "expires_at": expires,
+            "link": link, "sent": sent}
+
+
+@app.get("/admin/invites")
+def admin_list_invites(admin_id: int = Depends(require_admin)):
+    with db() as conn:
+        rows = conn.execute("SELECT * FROM invites ORDER BY id DESC").fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.get("/auth/invite/{token}")
+def invite_info(token: str):
+    """Valida o convite (público) e retorna o email pré-cadastrado."""
+    with db() as conn:
+        row = conn.execute("SELECT email, shop_name, expires_at, used_at FROM invites WHERE token=?", (token,)).fetchone()
+    if not row or row["used_at"] or row["expires_at"] < _now().isoformat():
+        raise HTTPException(422, "Convite inválido ou expirado")
+    return {"email": row["email"], "shop_name": row["shop_name"]}
+
+
+class InviteAcceptIn(BaseModel):
+    token: str
+    password: str = Field(min_length=6)
+
+
+@app.post("/auth/invite/accept")
+def invite_accept(body: InviteAcceptIn):
+    """Ativa o convite: cria a conta com o email do convite e a senha escolhida."""
+    with db() as conn:
+        row = conn.execute("SELECT email, shop_name, expires_at, used_at FROM invites WHERE token=?", (body.token,)).fetchone()
+        if not row or row["used_at"] or row["expires_at"] < _now().isoformat():
+            raise HTTPException(422, "Convite inválido ou expirado")
+        if conn.execute("SELECT 1 FROM shops WHERE owner_email=?", (row["email"],)).fetchone():
+            raise HTTPException(409, "Este email já tem conta — faça login")
+        cur = conn.execute(
+            "INSERT INTO shops (name, owner_email, password_hash, created_at) VALUES (?,?,?,?)",
+            (row["shop_name"], row["email"], _pwd.hash(body.password), _now().isoformat()))
+        shop_id = cur.lastrowid
+        conn.execute("UPDATE invites SET used_at=? WHERE token=?", (_now().isoformat(), body.token))
+    return {"shop_id": shop_id, "token": _make_token(shop_id), "shop_name": row["shop_name"], "email": row["email"]}
 
 
 # ---------------------------------------------------------------- models
