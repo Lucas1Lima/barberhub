@@ -142,16 +142,52 @@ CREATE TABLE IF NOT EXISTS cash_entries (
     description TEXT NOT NULL DEFAULT '',
     amount REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS blocks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_id INTEGER NOT NULL REFERENCES shops(id),
+    professional_id INTEGER NOT NULL REFERENCES professionals(id),
+    day TEXT NOT NULL,
+    start_time TEXT NOT NULL DEFAULT '00:00',
+    end_time TEXT NOT NULL DEFAULT '23:59',
+    reason TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS waitlist (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_id INTEGER NOT NULL REFERENCES shops(id),
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    preferred_day TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    shop_id INTEGER NOT NULL REFERENCES shops(id),
+    client_id INTEGER NOT NULL REFERENCES clients(id),
+    plan_name TEXT NOT NULL DEFAULT 'Mensal',
+    cuts_per_month INTEGER NOT NULL DEFAULT 2,
+    price REAL NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS settings (
+    shop_id INTEGER PRIMARY KEY REFERENCES shops(id),
+    loyalty_n INTEGER NOT NULL DEFAULT 10,          -- a cada N cortes, 1 grátis
+    inactive_days INTEGER NOT NULL DEFAULT 30,      -- cliente inativo após X dias
+    reminder_hours INTEGER NOT NULL DEFAULT 24      -- lembrete X horas antes
+);
 """
 
 
 def _migrate():
     with db() as conn:
         conn.executescript(SCHEMA)
-        # migração incremental: data de conclusão (caixa fecha pelo dia da conclusão)
+        # migração incremental: data de conclusão + flag de corte grátis (fidelidade)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(appointments)").fetchall()]
         if "concluded_at" not in cols:
             conn.execute("ALTER TABLE appointments ADD COLUMN concluded_at TEXT")
+        if "loyalty_used" not in cols:
+            conn.execute("ALTER TABLE appointments ADD COLUMN loyalty_used INTEGER NOT NULL DEFAULT 0")
         # migração v0.5: colunas admin/ativo/último login em shops
         shop_cols = [r["name"] for r in conn.execute("PRAGMA table_info(shops)").fetchall()]
         if "is_admin" not in shop_cols:
@@ -549,6 +585,25 @@ def _get_scoped(conn, table: str, obj_id: int, shop_id: int, label: str):
     return dict(row)
 
 
+def _settings(conn, shop_id: int) -> dict:
+    row = conn.execute("SELECT * FROM settings WHERE shop_id=?", (shop_id,)).fetchone()
+    if not row:
+        conn.execute("INSERT INTO settings (shop_id) VALUES (?)", (shop_id,))
+        row = conn.execute("SELECT * FROM settings WHERE shop_id=?", (shop_id,)).fetchone()
+    return dict(row)
+
+
+def _wa_link(phone: str, message: str) -> str:
+    """Link wa.me com encode correto e DDI validado."""
+    from urllib.parse import quote
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) in (10, 11):
+        digits = "55" + digits
+    elif len(digits) < 10 or len(digits) > 13:
+        digits = ""
+    return f"https://wa.me/{digits}?text={quote(message)}"
+
+
 def _parse_start(raw: str) -> datetime:
     try:
         dt = datetime.fromisoformat(raw)
@@ -730,6 +785,15 @@ def create_appointment(body: AppointmentIn, shop_id: int = Depends(current_shop)
         svc = _get_scoped(conn, "services", body.service_id, shop_id, "Serviço")
         start = _parse_start(body.start)
         _check_conflict(conn, shop_id, body.professional_id, start, svc["duration_min"])
+        # bloqueio de agenda (folga/intervalo) do profissional
+        b = conn.execute(
+            """SELECT 1 FROM blocks WHERE shop_id=? AND professional_id=? AND day=?
+               AND (?) < end_time AND (?) > start_time""",
+            (shop_id, body.professional_id, start.date().isoformat(),
+             start.strftime("%H:%M"),
+             (start + timedelta(minutes=svc["duration_min"])).strftime("%H:%M"))).fetchone()
+        if b:
+            raise HTTPException(409, "Profissional está com a agenda bloqueada nesse horário (folga/intervalo)")
         cli = conn.execute("SELECT name FROM clients WHERE id=? AND shop_id=?",
                            (body.client_id, shop_id)).fetchone() if body.client_id else None
         client_name = (cli["name"] if cli else None) or body.client_name or "Cliente avulso"
@@ -893,6 +957,288 @@ def cash_month(year: int, month: int, shop_id: int = Depends(current_shop)):
         return {"year": year, "month": month,
                 "days": {d: {"income": round(v["income"], 2), "expense": round(v["expense"], 2)}
                          for d, v in sorted(days.items())}}
+
+
+# ---------------------------------------------------------------- v0.6: configurações da loja
+class SettingsIn(BaseModel):
+    loyalty_n: Optional[int] = Field(default=None, ge=2, le=100)
+    inactive_days: Optional[int] = Field(default=None, ge=7, le=180)
+    reminder_hours: Optional[int] = Field(default=None, ge=1, le=72)
+
+
+@app.get("/settings")
+def get_settings(shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        return _settings(conn, shop_id)
+
+
+@app.patch("/settings")
+def update_settings(body: SettingsIn, shop_id: int = Depends(current_shop)):
+    data = body.model_dump(exclude_unset=True)
+    with db() as conn:
+        _settings(conn, shop_id)
+        for k, v in data.items():
+            conn.execute(f"UPDATE settings SET {k}=? WHERE shop_id=?", (v, shop_id))
+        return _settings(conn, shop_id)
+
+
+# ---------------------------------------------------------------- v0.6: fidelidade (a cada N cortes, 1 grátis)
+@app.get("/clients/{client_id}/loyalty")
+def client_loyalty(client_id: int, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        cli = _get_scoped(conn, "clients", client_id, shop_id, "Cliente")
+        st = _settings(conn, shop_id)
+        n = st["loyalty_n"]
+        done = conn.execute(
+            "SELECT COUNT(*) AS c FROM appointments WHERE client_id=? AND shop_id=? AND status='concluido'",
+            (client_id, shop_id)).fetchone()["c"]
+        used = conn.execute(
+            "SELECT COUNT(*) AS c FROM appointments WHERE client_id=? AND shop_id=? AND status='concluido' AND loyalty_used=1",
+            (client_id, shop_id)).fetchone()["c"]
+        cycles = done // n
+        progress = done % n
+        return {"client": cli, "loyalty_n": n, "completed": done,
+                "free_used": used, "cycles": cycles,
+                "progress": progress, "to_free": n - progress,
+                "has_free": progress == n - 1 and done > 0 and used < cycles}
+
+
+@app.post("/appointments/{ap_id}/use-free")
+def use_free_cut(ap_id: int, shop_id: int = Depends(current_shop)):
+    """Marca um corte concluído como uso do benefício fidelidade (grátis)."""
+    with db() as conn:
+        ap = _get_scoped(conn, "appointments", ap_id, shop_id, "Agendamento")
+        if ap["status"] != "concluido":
+            raise HTTPException(422, "Só cortes concluídos podem usar o benefício")
+        if ap["loyalty_used"]:
+            raise HTTPException(422, "Este corte já usou o benefício")
+        if not ap["client_id"]:
+            raise HTTPException(422, "Corte de cliente avulso não participa do fidelidade")
+        st = _settings(conn, shop_id)
+        n = st["loyalty_n"]
+        done = conn.execute(
+            "SELECT COUNT(*) AS c FROM appointments WHERE client_id=? AND shop_id=? AND status='concluido'",
+            (ap["client_id"], shop_id)).fetchone()["c"]
+        used = conn.execute(
+            "SELECT COUNT(*) AS c FROM appointments WHERE client_id=? AND shop_id=? AND status='concluido' AND loyalty_used=1",
+            (ap["client_id"], shop_id)).fetchone()["c"]
+        if used >= done // n:
+            raise HTTPException(422, f"Cliente ainda não completou {n} cortes para usar o grátis")
+        conn.execute("UPDATE appointments SET loyalty_used=1 WHERE id=?", (ap_id,))
+        return {"ok": True, "free_cut": True}
+
+
+# ---------------------------------------------------------------- v0.6: lembretes do dia (fila de amanhã)
+@app.get("/reminders/tomorrow")
+def reminders_tomorrow(shop_id: int = Depends(current_shop)):
+    """Agendamentos de amanhã com link WhatsApp pronto para cada um."""
+    tomorrow = (datetime.now() + timedelta(days=1)).date().isoformat()
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT a.id, a.start, a.client_name, a.client_id, a.service_id, s.name AS service_name,
+                      p.name AS professional_name
+               FROM appointments a
+               JOIN services s ON s.id = a.service_id
+               JOIN professionals p ON p.id = a.professional_id
+               WHERE a.shop_id=? AND a.status='agendado' AND a.start LIKE ?
+               ORDER BY a.start""", (shop_id, tomorrow + "%")).fetchall()
+        shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+        out = []
+        for r in rows:
+            phone = ""
+            if r["client_id"]:
+                c = conn.execute("SELECT phone FROM clients WHERE id=?", (r["client_id"],)).fetchone()
+                phone = c["phone"] if c else ""
+            when = r["start"][11:16]
+            msg = (f"Oi {r['client_name']}! Passando pra confirmar seu horário na {shop['name']} "
+                   f"amanhã ({tomorrow[8:10]}/{tomorrow[5:7]}) às {when} — {r['service_name']} com {r['professional_name']}. "
+                   f"Responde SIM pra confirmar ou me avisa se precisa remarcar! 💈")
+            out.append({"id": r["id"], "time": when, "client_name": r["client_name"],
+                        "service_name": r["service_name"], "professional_name": r["professional_name"],
+                        "phone": phone, "whatsapp_link": _wa_link(phone, msg)})
+    return {"day": tomorrow, "reminders": out}
+
+
+# ---------------------------------------------------------------- v0.6: reativação de inativos
+@app.get("/reports/inactive")
+def inactive_clients(days: Optional[int] = None, shop_id: int = Depends(current_shop)):
+    """Clientes que não voltam há X dias (configurável; default do settings).
+    Considera o último corte concluído — quem nunca cortou entra com 'nunca'."""
+    with db() as conn:
+        st = _settings(conn, shop_id)
+        threshold = days or st["inactive_days"]
+        cutoff = (datetime.now() - timedelta(days=threshold)).date().isoformat()
+        rows = conn.execute(
+            """SELECT c.id, c.name, c.phone,
+                      MAX(CASE WHEN a.status='concluido' THEN a.start END) AS last_cut
+               FROM clients c
+               LEFT JOIN appointments a ON a.client_id = c.id
+               WHERE c.shop_id=?
+               GROUP BY c.id""", (shop_id,)).fetchall()
+        out = []
+        for r in rows:
+            last = r["last_cut"]
+            if last is None:
+                out.append({"id": r["id"], "name": r["name"], "phone": r["phone"],
+                            "last_cut": None, "days_since": None, "never": True})
+                continue
+            if last[:10] <= cutoff:
+                d = (datetime.now().date() - datetime.fromisoformat(last[:10]).date()).days
+                out.append({"id": r["id"], "name": r["name"], "phone": r["phone"],
+                            "last_cut": last[:10], "days_since": d, "never": False})
+        out.sort(key=lambda x: (x["days_since"] is None, -(x["days_since"] or 0)))
+        shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+        for o in out:
+            msg = (f"Oi {o['name']}! Sentimos sua falta na {shop['name']} 💈 "
+                   + ("Que tal agendar um horário essa semana? " if o["never"] else
+                      f"Faz {o['days_since']} dias do seu último corte — já tá na hora de renovar o visual! "))
+            msg += "Responde aqui que eu te encaixo num horário bom pra você!"
+            o["whatsapp_link"] = _wa_link(o["phone"], msg)
+        return {"threshold_days": threshold, "count": len(out), "clients": out}
+
+
+# ---------------------------------------------------------------- v0.6: bloqueios de agenda (folga/intervalo)
+class BlockIn(BaseModel):
+    professional_id: int
+    day: str
+    start_time: str = "00:00"
+    end_time: str = "23:59"
+    reason: str = ""
+
+
+@app.post("/blocks")
+def create_block(body: BlockIn, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "professionals", body.professional_id, shop_id, "Profissional")
+        try:
+            hh1, mm1 = body.start_time.split(":"); hh2, mm2 = body.end_time.split(":")
+            if not (0 <= int(hh1) < 24 and 0 <= int(mm1) < 60 and 0 <= int(hh2) < 24 and 0 <= int(mm2) < 60):
+                raise ValueError
+        except ValueError:
+            raise HTTPException(422, "Horários no formato HH:MM")
+        if body.start_time >= body.end_time:
+            raise HTTPException(422, "end_time deve ser depois de start_time")
+        cur = conn.execute(
+            "INSERT INTO blocks (shop_id, professional_id, day, start_time, end_time, reason) VALUES (?,?,?,?,?,?)",
+            (shop_id, body.professional_id, body.day, body.start_time, body.end_time, body.reason))
+        return {**body.model_dump(), "id": cur.lastrowid, "shop_id": shop_id}
+
+
+@app.get("/blocks")
+def list_blocks(day: Optional[str] = None, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        if day:
+            rows = conn.execute("SELECT * FROM blocks WHERE shop_id=? AND day=? ORDER BY start_time", (shop_id, day)).fetchall()
+        else:
+            rows = conn.execute("SELECT * FROM blocks WHERE shop_id=? AND day>=? ORDER BY day, start_time",
+                                (shop_id, date.today().isoformat())).fetchall()
+        return [dict(r) for r in rows]
+
+
+@app.delete("/blocks/{block_id}")
+def delete_block(block_id: int, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "blocks", block_id, shop_id, "Bloqueio")
+        conn.execute("DELETE FROM blocks WHERE id=?", (block_id,))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- v0.6: lista de espera
+class WaitlistIn(BaseModel):
+    client_id: int
+    preferred_day: str = ""
+    notes: str = ""
+
+
+@app.post("/waitlist")
+def add_waitlist(body: WaitlistIn, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "clients", body.client_id, shop_id, "Cliente")
+        cur = conn.execute(
+            "INSERT INTO waitlist (shop_id, client_id, preferred_day, notes, created_at) VALUES (?,?,?,?,?)",
+            (shop_id, body.client_id, body.preferred_day, body.notes, _now().isoformat()))
+        return {**body.model_dump(), "id": cur.lastrowid, "shop_id": shop_id, "active": 1}
+
+
+@app.get("/waitlist")
+def list_waitlist(shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT w.*, c.name AS client_name, c.phone
+               FROM waitlist w JOIN clients c ON c.id = w.client_id
+               WHERE w.shop_id=? AND w.active=1 ORDER BY w.created_at""", (shop_id,)).fetchall()
+        out = []
+        for r in rows:
+            o = dict(r)
+            o["whatsapp_link"] = _wa_link(r["phone"],
+                f"Oi {r['client_name']}! Abriu um horário na agenda — quer pegar? Responde aqui que eu reservo pra você!")
+            out.append(o)
+        return out
+
+
+@app.delete("/waitlist/{entry_id}")
+def remove_waitlist(entry_id: int, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "waitlist", entry_id, shop_id, "Entrada")
+        conn.execute("UPDATE waitlist SET active=0 WHERE id=?", (entry_id,))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- v0.6: clube de assinatura
+class SubscriptionIn(BaseModel):
+    client_id: int
+    plan_name: str = "Mensal"
+    cuts_per_month: int = Field(default=2, ge=1, le=31)
+    price: float = Field(ge=0)
+
+
+@app.post("/subscriptions")
+def create_subscription(body: SubscriptionIn, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "clients", body.client_id, shop_id, "Cliente")
+        cur = conn.execute(
+            "INSERT INTO subscriptions (shop_id, client_id, plan_name, cuts_per_month, price, started_at) VALUES (?,?,?,?,?,?)",
+            (shop_id, body.client_id, body.plan_name, body.cuts_per_month, body.price, _now().isoformat()))
+        return {**body.model_dump(), "id": cur.lastrowid, "shop_id": shop_id, "active": 1}
+
+
+@app.get("/subscriptions")
+def list_subscriptions(shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT s.*, c.name AS client_name FROM subscriptions s
+               JOIN clients c ON c.id = s.client_id
+               WHERE s.shop_id=? AND s.active=1 ORDER BY s.started_at DESC""", (shop_id,)).fetchall()
+        out = []
+        for r in rows:
+            o = dict(r)
+            month_prefix = date.today().isoformat()[:7]
+            used = conn.execute(
+                "SELECT COUNT(*) AS c FROM appointments WHERE client_id=? AND shop_id=? AND status='concluido' AND start LIKE ?",
+                (r["client_id"], shop_id, month_prefix + "%")).fetchone()["c"]
+            o["used_this_month"] = used
+            o["remaining"] = max(0, r["cuts_per_month"] - used)
+            o["mrr"] = r["price"]
+            out.append(o)
+        return out
+
+
+@app.delete("/subscriptions/{sub_id}")
+def cancel_subscription(sub_id: int, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        _get_scoped(conn, "subscriptions", sub_id, shop_id, "Assinatura")
+        conn.execute("UPDATE subscriptions SET active=0 WHERE id=?", (sub_id,))
+    return {"ok": True}
+
+
+@app.get("/reports/mrr")
+def mrr_report(shop_id: int = Depends(current_shop)):
+    """Receita mensal recorrente das assinaturas ativas."""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(price),0) AS mrr, COUNT(*) AS n FROM subscriptions WHERE shop_id=? AND active=1",
+            (shop_id,)).fetchone()
+        return {"mrr": round(row["mrr"], 2), "active_subscriptions": row["n"]}
 
 
 @app.get("/health")

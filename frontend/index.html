@@ -106,14 +106,21 @@ nav .ic{font-size:20px}
 
   <section class="view on" id="v-agenda">
     <div class="row" style="margin-bottom:12px">
-      <div class="card"><h3>Hoje</h3><div class="big" id="kpiCount">0</div></div>
+      <div class="card"><h3>Agendamentos</h3><div class="big" id="kpiCount">0</div></div>
       <div class="card"><h3>Receita dia</h3><div class="big" id="kpiRev">R$ 0</div></div>
+    </div>
+    <div class="card" id="cardReminders" style="display:none">
+      <h3>🔔 Lembretes de amanhã <span style="text-transform:none;color:var(--gold)" id="remCount"></span></h3>
+      <div id="remList"></div>
     </div>
     <div class="card">
       <h3>Agenda do dia</h3>
       <div id="apList"><div class="empty">Carregando…</div></div>
     </div>
-    <button class="btn" onclick="openNew()">+ Novo agendamento</button>
+    <div class="row">
+      <button class="btn" onclick="openNew()">+ Agendar</button>
+      <button class="btn sec" onclick="openWaitModal()">⏳ Lista de espera</button>
+    </div>
   </section>
 
   <section class="view" id="v-caixa">
@@ -152,6 +159,22 @@ nav .ic{font-size:20px}
     <div class="card">
       <h3>Comissões do dia</h3>
       <div id="commList"><div class="empty">Carregando…</div></div>
+    </div>
+    <div class="card">
+      <h3>💤 Clientes que não voltam <span style="text-transform:none;color:var(--gold)" id="inactCount"></span></h3>
+      <p style="font-size:12px;color:var(--mut);margin-bottom:8px">Sem corte há <b id="inactDays">30</b> dias ou mais (configurável nos Ajustes)</p>
+      <div id="inactList"><div class="empty">Carregando…</div></div>
+    </div>
+    <div class="card">
+      <h3>💎 Assinaturas (clube)</h3>
+      <div id="subList"><div class="empty">—</div></div>
+      <label>Cliente</label><select id="subCli"></select>
+      <div class="row2" style="display:flex;gap:8px">
+        <div style="flex:1"><label>Cortes/mês</label><input id="subCuts" type="number" value="2" min="1"></div>
+        <div style="flex:1"><label>Preço/mês (R$)</label><input id="subPrice" type="number" step="0.01" placeholder="89,90"></div>
+      </div>
+      <button class="btn" onclick="addSub()">Adicionar assinatura</button>
+      <div style="margin-top:10px;font-size:13px;color:var(--mut)">MRR: <b style="color:var(--gold)" id="mrrVal">R$ 0</b></div>
     </div>
   </section>
 
@@ -195,6 +218,26 @@ nav .ic{font-size:20px}
       <input id="accNewPass" type="password" placeholder="nova senha (6+)" style="margin-top:6px">
       <button class="btn" onclick="changePass()">Salvar senha</button>
     </div>
+    <div class="card">
+      <h3>Preferências do negócio</h3>
+      <label>Fidelidade: a cada N cortes, 1 grátis</label>
+      <input id="setLoyalty" type="number" min="2" max="100" placeholder="10">
+      <label>Cliente inativo após (dias)</label>
+      <input id="setInactive" type="number" min="7" max="180" placeholder="30">
+      <button class="btn" onclick="saveSettings()">Salvar preferências</button>
+    </div>
+    <div class="card">
+      <h3>Bloqueios de agenda (folgas)</h3>
+      <div id="blockList"><div class="empty">—</div></div>
+      <label>Profissional</label><select id="blkProf"></select>
+      <label>Data</label><input id="blkDay" type="date">
+      <div class="row2" style="display:flex;gap:8px">
+        <div style="flex:1"><label>De</label><input id="blkStart" type="time" value="12:00"></div>
+        <div style="flex:1"><label>Até</label><input id="blkEnd" type="time" value="13:00"></div>
+      </div>
+      <label>Motivo (opcional)</label><input id="blkReason" placeholder="Ex.: almoço, folga">
+      <button class="btn" onclick="addBlock()">Bloquear horário</button>
+    </div>
   </section>
 
   <section class="view" id="v-admin">
@@ -223,6 +266,20 @@ nav .ic{font-size:20px}
     <input id="pickDate" type="date" style="margin-top:8px">
     <button class="btn" onclick="goToDate()">Ir</button>
     <button class="btn sec" onclick="closeDateModal()">Cancelar</button>
+  </div>
+</div>
+
+<!-- lista de espera -->
+<div id="waitModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:55;align-items:center;justify-content:center;padding:16px">
+  <div class="card" style="width:100%;max-width:420px;margin:0">
+    <h3>⏳ Lista de espera</h3>
+    <p style="font-size:12px;color:var(--mut)">Cancelou? Chame o próximo da fila e a cadeira não esfria.</p>
+    <div id="waitList"></div>
+    <label>Cliente</label><select id="wtCli"></select>
+    <label>Dia preferido (opcional)</label><input id="wtDay" type="date">
+    <label>Observação</label><input id="wtNotes" placeholder="Ex.: depois das 18h">
+    <button class="btn" onclick="addWait()">Adicionar à lista</button>
+    <button class="btn sec" onclick="closeWaitModal()">Fechar</button>
   </div>
 </div>
 
@@ -401,6 +458,9 @@ async function reloadBase(){
   [PROFS, SVCS, CLIS] = await Promise.all([
     api('/professionals'), api('/services'), api('/clients')]);
   renderProf(); renderSvc(); renderCli();
+  document.getElementById('blkProf').innerHTML = PROFS.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  document.getElementById('subCli').innerHTML = CLIS.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  loadBlocks(); loadSettings();
 }
 
 function renderProf(){ document.getElementById('profList').innerHTML = PROFS.length ? PROFS.map(p=>`
@@ -524,14 +584,29 @@ async function loadAgenda(){
   el.innerHTML = aps.length ? aps.map(a=>`
     <div class="ap">
       <span class="time">${a.start.slice(11,16)}</span>
-      <div class="info"><b>${esc(a.client_name)}</b><small>${esc(a.service_name)} · ${esc(a.professional_name)} · ${fmt(a.price)}</small></div>
+      <div class="info"><b>${esc(a.client_name)}</b><small>${esc(a.service_name)} · ${esc(a.professional_name)} · ${fmt(a.price)}${a.loyalty_used?' · <span style="color:var(--gold)">GRÁTIS (fidelidade)</span>':''}</small></div>
       <span class="tag ${a.status}">${a.status}</span>
       <div class="acts">
         ${a.status==='agendado' ? `<button class="ok" onclick="setStatus(${a.id},'concluido')">✓</button>
         <button class="no" onclick="setStatus(${a.id},'faltou')">✗</button>` : ''}
         ${a.client_id && a.status==='agendado' ? `<button class="wa" onclick="sendWa(${a.id})">WA</button>` : ''}
+        ${a.client_id && a.status==='concluido' && !a.loyalty_used ? `<button class="ok" style="background:var(--gold)" onclick="useFree(${a.id})" title="Usar corte grátis (fidelidade)">💎</button>` : ''}
       </div>
     </div>`).join('') : '<div class="empty">Sem agendamentos neste dia</div>';
+  loadReminders();
+}
+
+async function loadReminders(){
+  try{
+    const r = await api('/reminders/tomorrow');
+    const card = document.getElementById('cardReminders');
+    if(!r.reminders.length){ card.style.display='none'; return; }
+    card.style.display='block';
+    document.getElementById('remCount').textContent = `(${r.reminders.length})`;
+    document.getElementById('remList').innerHTML = r.reminders.map(m=>`
+      <div class="entry"><span><b style="color:var(--txt)">${m.time}</b> · ${esc(m.client_name)}<br><small style="color:var(--mut)">${esc(m.service_name)} · ${esc(m.professional_name)}</small></span>
+      <a class="wa" style="text-decoration:none;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:700" href="${m.whatsapp_link}" target="_blank">Zap</a></div>`).join('');
+  }catch(e){}
 }
 
 async function setStatus(id, status){
@@ -623,6 +698,133 @@ async function loadComm(){
   el.innerHTML = rep.professionals.length ? rep.professionals.map(p=>`
     <div class="rep-line"><span><b style="color:var(--txt)">${esc(p.professional_name)}</b><br><small style="color:var(--mut)">${p.services} serviço(s) · ${fmt(p.revenue)}</small></span><b>${fmt(p.commission)}</b></div>`).join('')
     : '<div class="empty">Nenhuma comissão neste dia</div>';
+  loadInactive(); loadSubs();
+}
+
+async function loadInactive(){
+  try{
+    const r = await api('/reports/inactive');
+    document.getElementById('inactDays').textContent = r.threshold_days;
+    document.getElementById('inactCount').textContent = `(${r.count})`;
+    const el = document.getElementById('inactList');
+    el.innerHTML = r.clients.length ? r.clients.map(c=>`
+      <div class="entry"><span><b style="color:var(--txt)">${esc(c.name)}</b><br><small style="color:var(--mut)">${c.never?'nunca cortou':'há '+c.days_since+' dias'}</small></span>
+      <a class="wa" style="text-decoration:none;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:700" href="${c.whatsapp_link}" target="_blank">Zap</a></div>`).join('')
+      : '<div class="empty">Nenhum cliente inativo 🎉</div>';
+  }catch(e){}
+}
+
+async function loadSubs(){
+  try{
+    const subs = await api('/subscriptions');
+    const el = document.getElementById('subList');
+    el.innerHTML = subs.length ? subs.map(s=>`
+      <div class="entry"><span><b style="color:var(--txt)">${esc(s.client_name)}</b><br><small style="color:var(--mut)">${esc(s.plan_name)} · ${s.used_this_month}/${s.cuts_per_month} cortes no mês · ${fmt(s.price)}/mês</small></span>
+      <span style="display:flex;gap:6px;align-items:center">
+        <span class="tag ${s.remaining>0?'concluido':'agendado'}">${s.remaining} restante(s)</span>
+        <button class="iconbtn del" onclick="cancelSub(${s.id})">✕</button>
+      </span></div>`).join('')
+      : '<div class="empty">Nenhuma assinatura ativa</div>';
+    const mrr = await api('/reports/mrr');
+    document.getElementById('mrrVal').textContent = fmt(mrr.mrr);
+  }catch(e){}
+}
+async function addSub(){
+  const clientId = parseInt(document.getElementById('subCli').value);
+  const cuts = parseInt(document.getElementById('subCuts').value || 2);
+  const price = parseFloat(document.getElementById('subPrice').value || 0);
+  if(!clientId) return toast('Cadastre o cliente primeiro');
+  try{
+    await api('/subscriptions', {method:'POST', body: JSON.stringify({client_id:clientId, cuts_per_month:cuts, price})});
+    loadSubs(); toast('Assinatura criada!');
+  }catch(e){ toast(e.message); }
+}
+async function cancelSub(id){
+  try{ await api(`/subscriptions/${id}`, {method:'DELETE'}); loadSubs(); toast('Assinatura cancelada'); }
+  catch(e){ toast(e.message); }
+}
+
+// ---------------- lista de espera
+function openWaitModal(){
+  document.getElementById('wtCli').innerHTML = CLIS.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  loadWaitList();
+  document.getElementById('waitModal').style.display='flex';
+}
+function closeWaitModal(){ document.getElementById('waitModal').style.display='none'; }
+async function loadWaitList(){
+  try{
+    const wl = await api('/waitlist');
+    document.getElementById('waitList').innerHTML = wl.length ? wl.map(w=>`
+      <div class="entry"><span><b style="color:var(--txt)">${esc(w.client_name)}</b><br><small style="color:var(--mut)">${esc(w.preferred_day||'qualquer dia')}${w.notes?' · '+esc(w.notes):''}</small></span>
+      <span style="display:flex;gap:6px">
+        <a class="wa" style="text-decoration:none;padding:6px 10px;border-radius:8px;font-size:11px;font-weight:700" href="${w.whatsapp_link}" target="_blank">Zap</a>
+        <button class="iconbtn del" onclick="rmWait(${w.id})">✕</button>
+      </span></div>`).join('')
+      : '<div class="empty">Lista vazia</div>';
+  }catch(e){}
+}
+async function addWait(){
+  const clientId = parseInt(document.getElementById('wtCli').value);
+  if(!clientId) return toast('Cadastre o cliente primeiro');
+  try{
+    await api('/waitlist', {method:'POST', body: JSON.stringify({client_id:clientId, preferred_day:document.getElementById('wtDay').value, notes:document.getElementById('wtNotes').value.trim()})});
+    document.getElementById('wtNotes').value='';
+    loadWaitList(); toast('Adicionado à lista');
+  }catch(e){ toast(e.message); }
+}
+async function rmWait(id){
+  try{ await api(`/waitlist/${id}`, {method:'DELETE'}); loadWaitList(); }
+  catch(e){ toast(e.message); }
+}
+
+// ---------------- bloqueios
+async function loadBlocks(){
+  try{
+    const blocks = await api('/blocks');
+    document.getElementById('blockList').innerHTML = blocks.length ? blocks.map(b=>`
+      <div class="entry"><span><b style="color:var(--txt)">${b.day.slice(8,10)}/${b.day.slice(5,7)}</b> ${b.start_time}–${b.end_time}<br><small style="color:var(--mut)">${esc(PROFS.find(p=>p.id===b.professional_id)?.name||'?')}${b.reason?' · '+esc(b.reason):''}</small></span>
+      <button class="iconbtn del" onclick="rmBlock(${b.id})">✕</button></div>`).join('')
+      : '<div class="empty">Nenhum bloqueio</div>';
+  }catch(e){}
+}
+async function addBlock(){
+  const profId = parseInt(document.getElementById('blkProf').value);
+  const day = document.getElementById('blkDay').value;
+  if(!profId || !day) return toast('Escolha profissional e data');
+  try{
+    await api('/blocks', {method:'POST', body: JSON.stringify({professional_id:profId, day, start_time:document.getElementById('blkStart').value, end_time:document.getElementById('blkEnd').value, reason:document.getElementById('blkReason').value.trim()})});
+    document.getElementById('blkReason').value='';
+    loadBlocks(); toast('Agenda bloqueada');
+  }catch(e){ toast(e.message); }
+}
+async function rmBlock(id){
+  try{ await api(`/blocks/${id}`, {method:'DELETE'}); loadBlocks(); }
+  catch(e){ toast(e.message); }
+}
+
+// ---------------- settings
+async function loadSettings(){
+  try{
+    const s = await api('/settings');
+    document.getElementById('setLoyalty').value = s.loyalty_n;
+    document.getElementById('setInactive').value = s.inactive_days;
+  }catch(e){}
+}
+async function saveSettings(){
+  const loyalty = parseInt(document.getElementById('setLoyalty').value);
+  const inactive = parseInt(document.getElementById('setInactive').value);
+  try{
+    await api('/settings', {method:'PATCH', body: JSON.stringify({loyalty_n:loyalty, inactive_days:inactive})});
+    toast('Preferências salvas!');
+  }catch(e){ toast(e.message); }
+}
+
+// ---------------- fidelidade
+async function useFree(id){
+  try{
+    await api(`/appointments/${id}/use-free`, {method:'POST'});
+    loadAll(); toast('💎 Corte grátis aplicado!');
+  }catch(e){ toast(e.message); }
 }
 
 async function saveAp(){
