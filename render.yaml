@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: barberhub
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BARBERHUB_SECRET
+        generateValue: true
+      - key: BARBERHUB_ORIGIN
+        sync: false   # preencher com a URL final do app (https://barberhub.onrender.com)

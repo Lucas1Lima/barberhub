@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#1a1a2e">
+<title>BarberHub — Agenda e Comissão</title>
+<style>
+:root{
+  --bg:#0f0f1a; --card:#1a1a2e; --card2:#222240; --line:#2e2e50;
+  --gold:#e8b13a; --gold2:#f5cd6b; --green:#3ecf8e; --red:#ff6b6b;
+  --txt:#f0f0f5; --mut:#9a9ab8;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;padding-bottom:76px}
+header{position:sticky;top:0;background:var(--card);border-bottom:1px solid var(--line);padding:14px 16px;display:flex;align-items:center;justify-content:space-between;z-index:10}
+header h1{font-size:18px;font-weight:700}
+header h1 span{color:var(--gold)}
+.badge{font-size:11px;background:var(--card2);border:1px solid var(--line);padding:4px 10px;border-radius:20px;color:var(--mut)}
+main{max-width:560px;margin:0 auto;padding:16px}
+.tabs{display:flex;gap:6px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:4px;margin-bottom:16px}
+.tabs button{flex:1;padding:10px 4px;border:0;background:transparent;color:var(--mut);font-size:13px;font-weight:600;border-radius:9px;cursor:pointer}
+.tabs button.on{background:var(--gold);color:#1a1a2e}
+.view{display:none}.view.on{display:block}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}
+.card h3{font-size:14px;color:var(--mut);font-weight:600;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}
+.big{font-size:28px;font-weight:800;color:var(--gold)}
+.row{display:flex;gap:10px}.row .card{flex:1;margin-bottom:0}
+label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+input,select{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--card2);color:var(--txt);font-size:15px}
+input:focus,select:focus{outline:none;border-color:var(--gold)}
+.btn{display:block;width:100%;padding:14px;border:0;border-radius:12px;background:var(--gold);color:#1a1a2e;font-size:15px;font-weight:700;cursor:pointer;margin-top:14px}
+.btn.sec{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+.btn:disabled{opacity:.5;cursor:wait}
+.ap{display:flex;align-items:center;gap:12px;padding:12px;border-bottom:1px solid var(--line)}
+.ap:last-child{border-bottom:0}
+.ap .time{font-weight:800;color:var(--gold);font-size:15px;min-width:52px}
+.ap .info{flex:1}.ap .info b{display:block;font-size:14px}.ap .info small{color:var(--mut);font-size:12px}
+.tag{font-size:10px;padding:3px 8px;border-radius:12px;font-weight:700}
+.tag.agendado{background:#2d3a5e;color:#7ea6ff}.tag.concluido{background:#1d3b2f;color:var(--green)}
+.tag.faltou{background:#3b1d1d;color:var(--red)}.tag.cancelado{background:#333;color:#888}
+.ap .acts{display:flex;flex-direction:column;gap:4px}
+.ap .acts button{padding:5px 8px;font-size:11px;border:0;border-radius:6px;cursor:pointer;font-weight:600}
+.ok{background:var(--green);color:#0f0f1a}.no{background:var(--red);color:#fff}.wa{background:#25d366;color:#0f0f1a}
+.empty{text-align:center;color:var(--mut);padding:24px 0;font-size:14px}
+.rep-line{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--line);font-size:14px}
+.rep-line:last-child{border:0}
+.rep-line b{color:var(--gold)}
+nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:8px 0 max(8px,env(safe-area-inset-bottom))}
+nav button{background:0;border:0;color:var(--mut);font-size:11px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;padding:4px 12px}
+nav button.on{color:var(--gold)}
+nav .ic{font-size:20px}
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:var(--green);color:#0f0f1a;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:700;opacity:0;transition:.3s;pointer-events:none;z-index:99}
+.toast.show{opacity:1}
+</style>
+</head>
+<body>
+<header>
+  <h1>Barber<span>Hub</span></h1>
+  <span class="badge" id="shopName">—</span>
+</header>
+<main>
+  <div class="tabs" id="dayTabs">
+    <button onclick="setDay(-1)">‹ Ontem</button>
+    <button class="on" onclick="setDay(0)">Hoje</button>
+    <button onclick="setDay(1)">Amanhã ›</button>
+  </div>
+
+  <section class="view on" id="v-agenda">
+    <div class="row" style="margin-bottom:12px">
+      <div class="card"><h3>Hoje</h3><div class="big" id="kpiCount">0</div></div>
+      <div class="card"><h3>Receita dia</h3><div class="big" id="kpiRev">R$ 0</div></div>
+    </div>
+    <div class="card">
+      <h3>Agenda do dia</h3>
+      <div id="apList"><div class="empty">Carregando…</div></div>
+    </div>
+    <button class="btn" onclick="openNew()">+ Novo agendamento</button>
+  </section>
+
+  <section class="view" id="v-caixa">
+    <div class="row" style="margin-bottom:12px">
+      <div class="card"><h3>Entradas</h3><div class="big" style="color:var(--green)" id="kpiIn">R$ 0</div></div>
+      <div class="card"><h3>Saídas</h3><div class="big" style="color:var(--red)" id="kpiOut">R$ 0</div></div>
+    </div>
+    <div class="card"><h3>Saldo do dia</h3><div class="big" id="kpiNet">R$ 0</div></div>
+    <div class="card">
+      <h3>Lançamento manual</h3>
+      <label>Descrição</label><input id="cashDesc" placeholder="Ex.: compra de café">
+      <label>Valor (R$)</label><input id="cashAmt" type="number" step="0.01" placeholder="0,00">
+      <div class="row" style="margin-top:10px">
+        <button class="btn sec" onclick="addCash('income')">+ Entrada</button>
+        <button class="btn sec" onclick="addCash('expense')">− Saída</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="v-comissao">
+    <div class="card">
+      <h3>Comissões do dia</h3>
+      <div id="commList"><div class="empty">Carregando…</div></div>
+    </div>
+  </section>
+
+  <section class="view" id="v-config">
+    <div class="card">
+      <h3>Profissionais</h3>
+      <div id="profList"></div>
+      <label>Nome</label><input id="profName" placeholder="Ex.: João">
+      <label>Modelo</label>
+      <select id="profModel">
+        <option value="percent">Comissão % (padrão 50%)</option>
+        <option value="chair">Aluguel de cadeira</option>
+      </select>
+      <label id="feeLbl" style="display:none">Aluguel/dia (R$)</label>
+      <input id="profFee" type="number" step="0.01" style="display:none" placeholder="20,00">
+      <button class="btn" onclick="addProf()">Adicionar</button>
+    </div>
+    <div class="card">
+      <h3>Serviços</h3>
+      <div id="svcList"></div>
+      <label>Nome</label><input id="svcName" placeholder="Ex.: Corte">
+      <label>Preço (R$)</label><input id="svcPrice" type="number" step="0.01" placeholder="50,00">
+      <label>Duração (min)</label><input id="svcDur" type="number" value="30">
+      <button class="btn" onclick="addSvc()">Adicionar</button>
+    </div>
+    <div class="card">
+      <h3>Clientes</h3>
+      <div id="cliList"></div>
+      <label>Nome</label><input id="cliName" placeholder="Ex.: Carlos">
+      <label>WhatsApp</label><input id="cliPhone" placeholder="13 99123-4567">
+      <button class="btn" onclick="addCli()">Adicionar</button>
+    </div>
+  </section>
+</main>
+
+<nav>
+  <button class="on" data-v="v-agenda" onclick="nav('v-agenda',this)"><span class="ic">📅</span>Agenda</button>
+  <button data-v="v-caixa" onclick="nav('v-caixa',this)"><span class="ic">💰</span>Caixa</button>
+  <button data-v="v-comissao" onclick="nav('v-comissao',this)"><span class="ic">✂️</span>Comissão</button>
+  <button data-v="v-config" onclick="nav('v-config',this)"><span class="ic">⚙️</span>Ajustes</button>
+</nav>
+
+<div class="modal" id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;align-items:center;justify-content:center;padding:16px">
+  <div class="card" style="width:100%;max-width:420px;margin:0">
+    <h3>Novo agendamento</h3>
+    <label>Profissional</label><select id="mProf"></select>
+    <label>Serviço</label><select id="mSvc"></select>
+    <label>Cliente</label><select id="mCli"></select>
+    <label>Data e hora</label><input id="mStart" type="datetime-local">
+    <button class="btn" id="saveApBtn" onclick="saveAp()">Agendar</button>
+    <button class="btn sec" onclick="closeModal()">Cancelar</button>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- LOGIN -->
+<div id="loginScreen" style="position:fixed;inset:0;background:var(--bg);z-index:200;display:flex;align-items:center;justify-content:center;padding:16px">
+  <div style="width:100%;max-width:380px">
+    <h1 style="font-size:26px;font-weight:800;text-align:center;margin-bottom:4px">Barber<span style="color:var(--gold)">Hub</span></h1>
+    <p style="text-align:center;color:var(--mut);font-size:13px;margin-bottom:24px">Agenda e comissão da sua barbearia</p>
+    <div class="card">
+      <label>Email</label><input id="authEmail" type="email" placeholder="voce@email.com">
+      <label>Senha</label><input id="authPass" type="password" placeholder="mínimo 6 caracteres">
+      <label id="shopLbl" style="display:none">Nome da barbearia</label>
+      <input id="authShop" style="display:none" placeholder="Ex.: Barbearia do Zé">
+      <button class="btn" id="authBtn" onclick="doAuth()">Entrar</button>
+      <button class="btn sec" onclick="toggleAuth()">Criar conta nova</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let TOKEN = localStorage.getItem('bh_token') || '';
+let SHOP = null;
+let DAY_OFFSET = 0;
+let PROFS = [], SVCS = [], CLIS = [];
+let isRegister = false;
+
+const fmt = n => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
+// data LOCAL (não UTC) — toISOString viraria "amanhã" depois das 21h no Brasil
+const dayStr = off => { const d = new Date(); d.setDate(d.getDate()+off);
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); };
+// escape HTML — todo dado do usuário interpolado em innerHTML passa por aqui
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg){ const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2200); }
+function nav(v, btn){ document.querySelectorAll('.view').forEach(x=>x.classList.remove('on')); document.getElementById(v).classList.add('on');
+  document.querySelectorAll('nav button').forEach(b=>b.classList.remove('on')); btn.classList.add('on'); }
+function setDay(off){ DAY_OFFSET = off; document.querySelectorAll('#dayTabs button').forEach((b,i)=>b.classList.toggle('on', i===off+1)); loadAgenda(); loadCash(); loadComm(); }
+function closeModal(){ document.getElementById('modal').style.display='none'; }
+function toggleAuth(){
+  isRegister = !isRegister;
+  document.getElementById('shopLbl').style.display = isRegister?'block':'none';
+  document.getElementById('authShop').style.display = isRegister?'block':'none';
+  document.getElementById('authBtn').textContent = isRegister?'Criar conta':'Entrar';
+}
+
+async function api(path, opts={}){
+  const headers = {'Content-Type':'application/json', ...(TOKEN?{'Authorization':'Bearer '+TOKEN}:{}) , ...(opts.headers||{})};
+  const r = await fetch(API+path, {...opts, headers});
+  if(r.status === 401){ localStorage.removeItem('bh_token'); TOKEN=''; showLogin(); throw new Error('Faça login'); }
+  if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || ('Erro '+r.status)); }
+  return r.json();
+}
+
+function showLogin(){ document.getElementById('loginScreen').style.display='flex'; }
+function hideLogin(){ document.getElementById('loginScreen').style.display='none'; }
+
+async function doAuth(){
+  const email = document.getElementById('authEmail').value.trim();
+  const pass = document.getElementById('authPass').value;
+  const shopName = document.getElementById('authShop').value.trim();
+  if(!email || pass.length < 6) return toast('Preencha email e senha (6+)');
+  const btn = document.getElementById('authBtn');
+  btn.disabled = true;
+  try{
+    const path = isRegister ? '/auth/register' : '/auth/login';
+    const body = isRegister ? {email, password: pass, shop_name: shopName} : {email, password: pass};
+    const r = await fetch(API+path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || 'Erro'); }
+    const data = await r.json();
+    TOKEN = data.token; localStorage.setItem('bh_token', TOKEN);
+    await start();
+  }catch(e){ toast(e.message); }
+  finally{ btn.disabled = false; }
+}
+
+async function start(){
+  const me = await api('/auth/me');
+  SHOP = me.id;
+  document.getElementById('shopName').textContent = me.name;
+  hideLogin();
+  await reloadBase();
+  loadAgenda(); loadCash(); loadComm();
+}
+
+async function boot(){
+  if(!TOKEN) return showLogin();
+  try{ await start(); }catch(e){ showLogin(); }
+}
+
+async function reloadBase(){
+  [PROFS, SVCS, CLIS] = await Promise.all([
+    api('/professionals'), api('/services'), api('/clients')]);
+  renderProf(); renderSvc(); renderCli();
+}
+
+function renderProf(){ document.getElementById('profList').innerHTML = PROFS.length ? PROFS.map(p=>
+  `<div class="rep-line"><span>${esc(p.name)} ${p.chair_rental?'· cadeira':''}</span><small style="color:var(--mut)">${esc(p.role)}</small></div>`).join('')
+  : '<div class="empty">Nenhum profissional ainda</div>'; }
+function renderSvc(){ document.getElementById('svcList').innerHTML = SVCS.length ? SVCS.map(s=>
+  `<div class="rep-line"><span>${esc(s.name)}</span><b>${fmt(s.price)}</b></div>`).join('')
+  : '<div class="empty">Nenhum serviço ainda</div>'; }
+function renderCli(){ document.getElementById('cliList').innerHTML = CLIS.length ? CLIS.map(c=>
+  `<div class="rep-line"><span>${esc(c.name)}</span><small style="color:var(--mut)">${esc(c.phone||'')}</small></div>`).join('')
+  : '<div class="empty">Nenhum cliente ainda</div>'; }
+
+async function addProf(){
+  const name = document.getElementById('profName').value.trim(); if(!name) return toast('Informe o nome');
+  const model = document.getElementById('profModel').value;
+  const fee = parseFloat(document.getElementById('profFee').value || 0);
+  try{
+    await api('/professionals', {method:'POST', body: JSON.stringify({name, chair_rental: model==='chair', fixed_fee: fee})});
+    document.getElementById('profName').value=''; await reloadBase(); toast('Profissional adicionado');
+  }catch(e){ toast(e.message); }
+}
+async function addSvc(){
+  const name = document.getElementById('svcName').value.trim();
+  const price = parseFloat(document.getElementById('svcPrice').value);
+  if(!name || !price) return toast('Preencha nome e preço');
+  try{
+    await api('/services', {method:'POST', body: JSON.stringify({name, price, duration_min: parseInt(document.getElementById('svcDur').value||30)})});
+    document.getElementById('svcName').value=''; await reloadBase(); toast('Serviço adicionado');
+  }catch(e){ toast(e.message); }
+}
+async function addCli(){
+  const name = document.getElementById('cliName').value.trim(); if(!name) return toast('Informe o nome');
+  try{
+    await api('/clients', {method:'POST', body: JSON.stringify({name, phone: document.getElementById('cliPhone').value})});
+    document.getElementById('cliName').value=''; document.getElementById('cliPhone').value='';
+    await reloadBase(); toast('Cliente adicionado');
+  }catch(e){ toast(e.message); }
+}
+document.getElementById('profModel').addEventListener('change', e=>{
+  const chair = e.target.value==='chair';
+  document.getElementById('feeLbl').style.display = chair?'block':'none';
+  document.getElementById('profFee').style.display = chair?'block':'none';
+});
+
+function openNew(){
+  // popula os selects do modal com os dados atuais
+  document.getElementById('mProf').innerHTML = PROFS.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
+  document.getElementById('mSvc').innerHTML = SVCS.map(s=>`<option value="${s.id}">${esc(s.name)} — ${fmt(s.price)}</option>`).join('');
+  document.getElementById('mCli').innerHTML = '<option value="">Avulso</option>' + CLIS.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
+  if(!PROFS.length || !SVCS.length) return toast('Cadastre profissional e serviço primeiro (aba Ajustes)');
+  document.getElementById('modal').style.display='flex';
+}
+
+async function loadAgenda(){
+  const aps = await api(`/appointments?day=${dayStr(DAY_OFFSET)}`);
+  document.getElementById('kpiCount').textContent = aps.length;
+  document.getElementById('kpiRev').textContent = fmt(aps.filter(a=>a.status==='concluido').reduce((s,a)=>s+a.price,0));
+  const el = document.getElementById('apList');
+  el.innerHTML = aps.length ? aps.map(a=>`
+    <div class="ap">
+      <span class="time">${a.start.slice(11,16)}</span>
+      <div class="info"><b>${esc(a.client_name)}</b><small>${esc(a.service_name)} · ${esc(a.professional_name)} · ${fmt(a.price)}</small></div>
+      <span class="tag ${a.status}">${a.status}</span>
+      <div class="acts">
+        ${a.status==='agendado' ? `<button class="ok" onclick="setStatus(${a.id},'concluido')">✓</button>
+        <button class="no" onclick="setStatus(${a.id},'faltou')">✗</button>` : ''}
+        ${a.client_id && a.status==='agendado' ? `<button class="wa" onclick="sendWa(${a.id})">WA</button>` : ''}
+      </div>
+    </div>`).join('') : '<div class="empty">Sem agendamentos neste dia</div>';
+}
+
+async function setStatus(id, status){
+  try{
+    await api(`/appointments/${id}/status`, {method:'PATCH', body: JSON.stringify({status})});
+    loadAgenda(); loadCash(); loadComm(); toast(status==='concluido'?'Concluído!':'Marcado como faltou');
+  }catch(e){ toast(e.message); }
+}
+async function sendWa(id){ try{ const r = await api(`/appointments/${id}/reminder`); window.open(r.whatsapp_link, '_blank'); }catch(e){ toast(e.message); } }
+
+async function loadCash(){
+  const c = await api(`/reports/daily-cash?day=${dayStr(DAY_OFFSET)}`);
+  document.getElementById('kpiIn').textContent = fmt(c.services_revenue + c.manual_income);
+  document.getElementById('kpiOut').textContent = fmt(c.expenses);
+  document.getElementById('kpiNet').textContent = fmt(c.net);
+}
+async function addCash(kind){
+  const desc = document.getElementById('cashDesc').value.trim();
+  const amt = parseFloat(document.getElementById('cashAmt').value);
+  if(!amt) return toast('Informe o valor');
+  try{
+    await api('/cash-entries', {method:'POST', body: JSON.stringify({day:dayStr(DAY_OFFSET), kind, description:desc, amount:amt})});
+    document.getElementById('cashDesc').value=''; document.getElementById('cashAmt').value='';
+    loadCash(); toast(kind==='income'?'Entrada lançada':'Saída lançada');
+  }catch(e){ toast(e.message); }
+}
+
+async function loadComm(){
+  const rep = await api(`/reports/commissions?day=${dayStr(DAY_OFFSET)}`);
+  const el = document.getElementById('commList');
+  el.innerHTML = rep.professionals.length ? rep.professionals.map(p=>`
+    <div class="rep-line"><span><b style="color:var(--txt)">${esc(p.professional_name)}</b><br><small style="color:var(--mut)">${p.services} serviço(s) · ${fmt(p.revenue)}</small></span><b>${fmt(p.commission)}</b></div>`).join('')
+    : '<div class="empty">Nenhuma comissão neste dia</div>';
+}
+
+async function saveAp(){
+  const profId = parseInt(document.getElementById('mProf').value);
+  const svcId = parseInt(document.getElementById('mSvc').value);
+  const cliId = document.getElementById('mCli').value ? parseInt(document.getElementById('mCli').value) : null;
+  const start = document.getElementById('mStart').value;
+  if(!profId || !svcId) return toast('Escolha profissional e serviço');
+  if(!start) return toast('Escolha data e hora');
+  const btn = document.getElementById('saveApBtn');
+  btn.disabled = true;
+  try{
+    await api('/appointments', {method:'POST', body: JSON.stringify({professional_id:profId, service_id:svcId, client_id:cliId, start})});
+    closeModal(); loadAgenda(); loadCash(); toast('Agendado!');
+  }catch(e){ toast(e.message); }
+  finally{ btn.disabled = false; }
+}
+
+boot();
+</script>
+</body>
+</html>
