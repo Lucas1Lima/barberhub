@@ -122,7 +122,7 @@ async function boot(){
     document.getElementById('svcChips').innerHTML = SERVICES.map(s=>
       `<div class="chip" onclick="pickSvc(${s.id},'${s.name.replace(/'/g,"\\'")}',${s.price})">${s.name.replace(/</g,'&lt;')} · ${fmt(s.price)}</div>`).join('');
     document.getElementById('profChips').innerHTML = PROFS.map(p=>
-      `<div class="chip" onclick="pickProf(${p.id},'${p.name.replace(/'/g,"\\'")}')">${p.name.replace(/</g,'&lt;')}</div>`).join('');
+      `<div class="chip" onclick="pickProf(${p.id},'${p.name.replace(/'/g,"\\'")}')">${p.photo?`<img src="${p.photo}" style="width:28px;height:28px;border-radius:50%;object-fit:cover;vertical-align:middle;margin-right:6px">`:''}${p.name.replace(/</g,'&lt;')}</div>`).join('');
     const today = new Date();
     const iso = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
     document.getElementById('dayPick').value = iso;

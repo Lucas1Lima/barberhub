@@ -87,6 +87,8 @@ nav .ic{font-size:20px}
 .entry:last-child{border:0}
 .entry .amt.in{color:var(--green)}.entry .amt.out{color:var(--red)}
 .callout-ok{background:#123527;border:1px solid var(--green);color:var(--green);padding:10px;border-radius:10px;font-size:13px}
+.prof-avatar{width:44px;height:44px;border-radius:50%;background:var(--card2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-size:18px;cursor:pointer;overflow:hidden;flex-shrink:0}
+.prof-avatar img{width:100%;height:100%;object-fit:cover}
 .callout-warn{background:#3a2f12;border:1px solid var(--gold);color:var(--gold2);padding:10px;border-radius:10px;font-size:12px;word-break:break-all}
 </style>
 </head>
@@ -166,6 +168,16 @@ nav .ic{font-size:20px}
       <div id="inactList"><div class="empty">Carregando…</div></div>
     </div>
     <div class="card">
+      <h3>🎂 Aniversariantes do mês <span style="text-transform:none;color:var(--gold)" id="bdayCount"></span></h3>
+      <div id="bdayList"><div class="empty">—</div></div>
+    </div>
+    <div class="card">
+      <h3>📊 Resumo da semana</h3>
+      <div id="weeklyBox"><div class="empty">—</div></div>
+      <button class="btn sec" onclick="sendWeekly()">📲 Enviar por WhatsApp</button>
+      <p style="font-size:11px;color:var(--mut);margin-top:8px">Enviado por email toda segunda às 8h (se SMTP ativo) — ou copie a mensagem pronta e mande no seu Zap.</p>
+    </div>
+    <div class="card">
       <h3>💎 Assinaturas (clube)</h3>
       <div id="subList"><div class="empty">—</div></div>
       <label>Cliente</label><select id="subCli"></select>
@@ -205,6 +217,7 @@ nav .ic{font-size:20px}
       <div id="cliList"></div>
       <label>Nome</label><input id="cliName" placeholder="Ex.: Carlos">
       <label>WhatsApp</label><input id="cliPhone" placeholder="13 99123-4567">
+      <label>Aniversário (opcional)</label><input id="cliBday" type="date">
       <button class="btn" onclick="addCli()">Adicionar</button>
     </div>
     <div class="card">
@@ -233,6 +246,9 @@ nav .ic{font-size:20px}
       <input id="setLoyalty" type="number" min="2" max="100" placeholder="10">
       <label>Cliente inativo após (dias)</label>
       <input id="setInactive" type="number" min="7" max="180" placeholder="30">
+      <label style="display:flex;align-items:center;gap:8px;margin-top:14px">
+        <input type="checkbox" id="setWeekly" style="width:auto"> Relatório semanal por email (toda segunda 8h)
+      </label>
       <button class="btn" onclick="saveSettings()">Salvar preferências</button>
     </div>
     <div class="card">
@@ -485,14 +501,46 @@ async function boot(){
 async function reloadBase(){
   [PROFS, SVCS, CLIS] = await Promise.all([
     api('/professionals'), api('/services'), api('/clients')]);
+  // carregar fotos dos profissionais (campo não vem na listagem para manter leve)
+  await Promise.all(PROFS.map(async p=>{
+    try{ const r = await api(`/professionals/${p.id}/photo`); p.photo = r.photo; }catch(e){ p.photo=''; }
+  }));
   renderProf(); renderSvc(); renderCli();
   document.getElementById('blkProf').innerHTML = PROFS.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('');
   document.getElementById('subCli').innerHTML = CLIS.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('');
   loadBlocks(); loadSettings();
 }
 
+function pickPhoto(profId){
+  const inp = document.createElement('input');
+  inp.type = 'file'; inp.accept = 'image/*';
+  inp.onchange = async ()=>{
+    const file = inp.files[0]; if(!file) return;
+    // comprimir no navegador: max 300px, jpeg 0.8 — mantém leve
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = async ()=>{
+      const canvas = document.createElement('canvas');
+      const scale = Math.min(1, 300/Math.max(img.width, img.height));
+      canvas.width = img.width*scale; canvas.height = img.height*scale;
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
+      URL.revokeObjectURL(url);
+      try{
+        await api(`/professionals/${profId}/photo`, {method:'PATCH', body: JSON.stringify({photo: dataUrl})});
+        const p = PROFS.find(x=>x.id===profId); if(p) p.photo = dataUrl;
+        renderProf(); toast('Foto atualizada!');
+      }catch(e){ toast(e.message); }
+    };
+    img.src = url;
+  };
+  inp.click();
+}
+
 function renderProf(){ document.getElementById('profList').innerHTML = PROFS.length ? PROFS.map(p=>`
-  <div class="rep-line"><span>${esc(p.name)} ${p.chair_rental?'· cadeira':''}<br><small style="color:var(--mut)">${esc(p.role)}</small></span>
+  <div class="rep-line"><span style="display:flex;gap:10px;align-items:center">
+    <span class="prof-avatar" id="av-${p.id}" onclick="pickPhoto(${p.id})" title="Trocar foto">${p.photo?`<img src="${p.photo}" alt="">`:'📷'}</span>
+    <span>${esc(p.name)} ${p.chair_rental?'· cadeira':''}<br><small style="color:var(--mut)">${esc(p.role)}</small></span></span>
     <span><button class="iconbtn" onclick="toggleEdit('prof',${p.id})">✏️</button></span></div>
   <div class="editbox" id="edit-prof-${p.id}">
     <div class="row2"><input id="ep-name-${p.id}" value="${esc(p.name)}" placeholder="Nome">
@@ -519,11 +567,13 @@ function renderSvc(){ document.getElementById('svcList').innerHTML = SVCS.length
   </div>`).join('')
   : '<div class="empty">Nenhum serviço ainda</div>'; }
 function renderCli(){ document.getElementById('cliList').innerHTML = CLIS.length ? CLIS.map(c=>`
-  <div class="rep-line"><span>${esc(c.name)}<br><small style="color:var(--mut)">${esc(c.phone||'')}</small></span>
+  <div class="rep-line"><span>${esc(c.name)}${c.birthday?' 🎂':''}<br><small style="color:var(--mut)">${esc(c.phone||'')}</small></span>
     <span><button class="iconbtn" onclick="toggleEdit('cli',${c.id})">✏️</button></span></div>
   <div class="editbox" id="edit-cli-${c.id}">
     <div class="row2"><input id="ec-name-${c.id}" value="${esc(c.name)}" placeholder="Nome">
     <input id="ec-phone-${c.id}" value="${esc(c.phone||'')}" placeholder="WhatsApp"></div>
+    <label style="margin-top:6px">Aniversário (dia/mês)</label>
+    <input id="ec-bday-${c.id}" type="date" value="${c.birthday||''}">
     <button class="btn" style="margin-top:6px" onclick="saveCli(${c.id})">Salvar</button>
   </div>`).join('')
   : '<div class="empty">Nenhum cliente ainda</div>'; }
@@ -557,8 +607,9 @@ async function saveCli(id){
   try{
     const name = document.getElementById(`ec-name-${id}`).value.trim();
     const phone = document.getElementById(`ec-phone-${id}`).value.trim();
+    const birthday = document.getElementById(`ec-bday-${id}`).value || '';
     if(!name) return toast('Informe o nome');
-    await api(`/clients/${id}`, {method:'PATCH', body: JSON.stringify({name, phone})});
+    await api(`/clients/${id}`, {method:'PATCH', body: JSON.stringify({name, phone, birthday})});
     await reloadBase(); toast('Cliente atualizado');
   }catch(e){ toast(e.message); }
 }
@@ -584,8 +635,8 @@ async function addSvc(){
 async function addCli(){
   const name = document.getElementById('cliName').value.trim(); if(!name) return toast('Informe o nome');
   try{
-    await api('/clients', {method:'POST', body: JSON.stringify({name, phone: document.getElementById('cliPhone').value})});
-    document.getElementById('cliName').value=''; document.getElementById('cliPhone').value='';
+    await api('/clients', {method:'POST', body: JSON.stringify({name, phone: document.getElementById('cliPhone').value, birthday: document.getElementById('cliBday').value || ''})});
+    document.getElementById('cliName').value=''; document.getElementById('cliPhone').value=''; document.getElementById('cliBday').value='';
     await reloadBase(); toast('Cliente adicionado');
   }catch(e){ toast(e.message); }
 }
@@ -740,6 +791,40 @@ async function loadInactive(){
       <a class="wa" style="text-decoration:none;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:700" href="${c.whatsapp_link}" target="_blank">Zap</a></div>`).join('')
       : '<div class="empty">Nenhum cliente inativo 🎉</div>';
   }catch(e){}
+  loadBirthdays(); loadWeekly();
+}
+
+async function loadBirthdays(){
+  try{
+    const r = await api('/reports/birthdays');
+    document.getElementById('bdayCount').textContent = `(${r.count})`;
+    const el = document.getElementById('bdayList');
+    el.innerHTML = r.clients.length ? r.clients.map(c=>`
+      <div class="entry"><span><b style="color:var(--txt)">${esc(c.name)}</b><br><small style="color:var(--mut)">dia ${c.day}</small></span>
+      <a class="wa" style="text-decoration:none;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:700" href="${c.whatsapp_link}" target="_blank">Zap 🎂</a></div>`).join('')
+      : '<div class="empty">Nenhum aniversariante este mês</div>';
+  }catch(e){}
+}
+
+async function loadWeekly(){
+  try{
+    const r = await api('/reports/weekly');
+    const el = document.getElementById('weeklyBox');
+    el.innerHTML = `
+      <div class="rep-line"><span>💰 Receita</span><b>${fmt(r.revenue)}</b></div>
+      <div class="rep-line"><span>✂️ Cortes concluídos</span><b>${r.cuts}</b></div>
+      ${r.no_shows?`<div class="rep-line"><span>⚠️ Faltas</span><b style="color:var(--red)">${r.no_shows}</b></div>`:''}
+      ${r.avg_ticket?`<div class="rep-line"><span>📈 Ticket médio</span><b>${fmt(r.avg_ticket)}</b></div>`:''}
+      ${r.top_professional?`<div class="rep-line"><span>🏆 Destaque</span><b>${esc(r.top_professional.name)}</b></div>`:''}
+      ${r.new_clients?`<div class="rep-line"><span>🆕 Clientes novos</span><b>${r.new_clients}</b></div>`:''}`;
+  }catch(e){}
+}
+async function sendWeekly(){
+  try{
+    const r = await api('/reports/weekly/message');
+    const text = encodeURIComponent(r.message);
+    window.open(`https://wa.me/?text=${text}`, '_blank');
+  }catch(e){ toast(e.message); }
 }
 
 async function loadSubs(){
@@ -836,6 +921,7 @@ async function loadSettings(){
     const s = await api('/settings');
     document.getElementById('setLoyalty').value = s.loyalty_n;
     document.getElementById('setInactive').value = s.inactive_days;
+    document.getElementById('setWeekly').checked = !!s.weekly_report;
     const me = await api('/auth/me');
     document.getElementById('pubLink').value = `${location.origin}/book?s=${me.slug}`;
   }catch(e){}
@@ -850,8 +936,9 @@ function openPub(){ window.open(document.getElementById('pubLink').value, '_blan
 async function saveSettings(){
   const loyalty = parseInt(document.getElementById('setLoyalty').value);
   const inactive = parseInt(document.getElementById('setInactive').value);
+  const weekly = document.getElementById('setWeekly').checked;
   try{
-    await api('/settings', {method:'PATCH', body: JSON.stringify({loyalty_n:loyalty, inactive_days:inactive})});
+    await api('/settings', {method:'PATCH', body: JSON.stringify({loyalty_n:loyalty, inactive_days:inactive, weekly_report:weekly})});
     toast('Preferências salvas!');
   }catch(e){ toast(e.message); }
 }

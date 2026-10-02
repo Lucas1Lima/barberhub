@@ -136,7 +136,8 @@ CREATE TABLE IF NOT EXISTS clients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     shop_id INTEGER NOT NULL REFERENCES shops(id),
     name TEXT NOT NULL,
-    phone TEXT NOT NULL DEFAULT ''
+    phone TEXT NOT NULL DEFAULT '',
+    birthday TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS appointments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,7 +223,20 @@ def _migrate():
             conn.execute("ALTER TABLE appointments ADD COLUMN concluded_at TEXT")
         if "loyalty_used" not in cols:
             conn.execute("ALTER TABLE appointments ADD COLUMN loyalty_used INTEGER NOT NULL DEFAULT 0")
-        # migração v0.5: colunas admin/ativo/último login em shops
+        # migração v0.8: aniversário do cliente
+        cli_cols = [r["name"] for r in conn.execute("PRAGMA table_info(clients)").fetchall()]
+        if "birthday" not in cli_cols:
+            conn.execute("ALTER TABLE clients ADD COLUMN birthday TEXT NOT NULL DEFAULT ''")
+        # migração v0.8: foto do profissional
+        prof_cols = [r["name"] for r in conn.execute("PRAGMA table_info(professionals)").fetchall()]
+        if "photo" not in prof_cols:
+            conn.execute("ALTER TABLE professionals ADD COLUMN photo TEXT NOT NULL DEFAULT ''")
+        # migração v0.8: relatório semanal
+        shop_cols = [r["name"] for r in conn.execute("PRAGMA table_info(shops)").fetchall()]
+        if "weekly_report" not in shop_cols:
+            conn.execute("ALTER TABLE shops ADD COLUMN weekly_report INTEGER NOT NULL DEFAULT 1")
+        if "last_report_sent" not in shop_cols:
+            conn.execute("ALTER TABLE shops ADD COLUMN last_report_sent TEXT")
         shop_cols = [r["name"] for r in conn.execute("PRAGMA table_info(shops)").fetchall()]
         if "is_admin" not in shop_cols:
             conn.execute("ALTER TABLE shops ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
@@ -583,11 +597,13 @@ class ServicePatch(BaseModel):
 class ClientIn(BaseModel):
     name: str
     phone: str = ""
+    birthday: str = ""          # "MM-DD" ou "YYYY-MM-DD" (opcional)
 
 
 class ClientPatch(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
+    birthday: Optional[str] = None
 
 
 class CommissionRuleIn(BaseModel):
@@ -762,8 +778,8 @@ def update_service(svc_id: int, body: ServicePatch, shop_id: int = Depends(curre
 @app.post("/clients")
 def create_client(body: ClientIn, shop_id: int = Depends(current_shop)):
     with db() as conn:
-        cur = conn.execute("INSERT INTO clients (shop_id, name, phone) VALUES (?,?,?)",
-                           (shop_id, body.name, body.phone))
+        cur = conn.execute("INSERT INTO clients (shop_id, name, phone, birthday) VALUES (?,?,?,?)",
+                           (shop_id, body.name, body.phone, body.birthday))
         return {**body.model_dump(), "id": cur.lastrowid, "shop_id": shop_id}
 
 
@@ -1004,6 +1020,7 @@ class SettingsIn(BaseModel):
     loyalty_n: Optional[int] = Field(default=None, ge=2, le=100)
     inactive_days: Optional[int] = Field(default=None, ge=7, le=180)
     reminder_hours: Optional[int] = Field(default=None, ge=1, le=72)
+    weekly_report: Optional[bool] = None
 
 
 @app.get("/settings")
@@ -1015,11 +1032,16 @@ def get_settings(shop_id: int = Depends(current_shop)):
 @app.patch("/settings")
 def update_settings(body: SettingsIn, shop_id: int = Depends(current_shop)):
     data = body.model_dump(exclude_unset=True)
+    weekly = data.pop("weekly_report", None)
     with db() as conn:
         _settings(conn, shop_id)
         for k, v in data.items():
             conn.execute(f"UPDATE settings SET {k}=? WHERE shop_id=?", (v, shop_id))
-        return _settings(conn, shop_id)
+        if weekly is not None:
+            conn.execute("UPDATE shops SET weekly_report=? WHERE id=?", (int(weekly), shop_id))
+        out = _settings(conn, shop_id)
+        out["weekly_report"] = bool(conn.execute("SELECT weekly_report FROM shops WHERE id=?", (shop_id,)).fetchone()["weekly_report"])
+        return out
 
 
 # ---------------------------------------------------------------- v0.6: fidelidade (a cada N cortes, 1 grátis)
@@ -1289,7 +1311,7 @@ def public_info(slug: str):
         shop = conn.execute("SELECT id, name FROM shops WHERE id=?", (_shop_id_from_slug(conn, slug),)).fetchone()
         if not shop:
             raise HTTPException(404, "Barbearia não encontrada")
-        profs = conn.execute("SELECT id, name, role FROM professionals WHERE shop_id=?", (shop["id"],)).fetchall()
+        profs = conn.execute("SELECT id, name, role, photo FROM professionals WHERE shop_id=?", (shop["id"],)).fetchall()
         svcs = conn.execute("SELECT id, name, price, duration_min FROM services WHERE shop_id=?", (shop["id"],)).fetchall()
         return {"shop": dict(shop), "slug": slug,
                 "professionals": [dict(p) for p in profs],
@@ -1384,6 +1406,238 @@ def public_slots(slug: str, day: str, professional_id: int):
             blocked = any(b["start_time"] < t_end.strftime("%H:%M") and b["end_time"] > t_str for b in blocks)
             slots.append({"time": t_str, "free": not conflict and not blocked})
         return {"day": day, "slots": slots}
+
+
+# ---------------------------------------------------------------- v0.8: aniversariantes do mês
+@app.get("/reports/birthdays")
+def birthdays(month: Optional[int] = None, shop_id: int = Depends(current_shop)):
+    """Aniversariantes do mês (default: mês atual) com Zap pronto."""
+    m = month or date.today().month
+    if not (1 <= m <= 12):
+        raise HTTPException(422, "month deve ser 1-12")
+    with db() as conn:
+        rows = conn.execute(
+            """SELECT id, name, phone, birthday FROM clients
+               WHERE shop_id=? AND birthday LIKE ? ORDER BY birthday""",
+            (shop_id, f"____-{m:02d}-%")).fetchall()
+        shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+        out = []
+        for r in rows:
+            b = r["birthday"]
+            day = b[8:10] if len(b) == 10 else b[3:5]
+            msg = (f"Oi {r['name']}! 🎉 A equipe da {shop['name']} deseja um FELIZ ANIVERSÁRIO! "
+                   f"Passe aqui essa semana pra comemorar — seu corte tem 20% OFF de presente. 💈🎂")
+            out.append({"id": r["id"], "name": r["name"], "phone": r["phone"],
+                        "birthday": b, "day": day, "whatsapp_link": _wa_link(r["phone"], msg)})
+        return {"month": m, "count": len(out), "clients": out}
+
+
+# ---------------------------------------------------------------- v0.8: foto do profissional
+class PhotoIn(BaseModel):
+    photo: str = ""     # data URL (data:image/jpeg;base64,...) — pequena, comprimida no frontend
+
+
+@app.patch("/professionals/{prof_id}/photo")
+def set_professional_photo(prof_id: int, body: PhotoIn, shop_id: int = Depends(current_shop)):
+    if len(body.photo) > 300_000:   # ~300KB — protege o banco
+        raise HTTPException(422, "Foto muito grande (máx. ~300KB)")
+    if body.photo and not body.photo.startswith("data:image/"):
+        raise HTTPException(422, "Formato inválido — envie uma imagem")
+    with db() as conn:
+        _get_scoped(conn, "professionals", prof_id, shop_id, "Profissional")
+        conn.execute("UPDATE professionals SET photo=? WHERE id=?", (body.photo, prof_id))
+        return {"ok": True, "photo": body.photo[:50] + ("..." if len(body.photo) > 50 else "")}
+
+
+@app.get("/professionals/{prof_id}/photo")
+def get_professional_photo(prof_id: int, shop_id: int = Depends(current_shop)):
+    with db() as conn:
+        row = conn.execute("SELECT photo FROM professionals WHERE id=? AND shop_id=?", (prof_id, shop_id)).fetchone()
+    if not row:
+        raise HTTPException(404, "Profissional não encontrado")
+    return {"photo": row["photo"]}
+
+
+# ---------------------------------------------------------------- v0.8: relatório semanal
+@app.get("/reports/weekly")
+def weekly_report(shop_id: int = Depends(current_shop)):
+    """Resumo dos últimos 7 dias: receita, cortes, faltas, ticket médio, top profissional."""
+    with db() as conn:
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        row = conn.execute(
+            """SELECT
+                 COALESCE(SUM(CASE WHEN status='concluido' THEN price END),0) AS revenue,
+                 SUM(CASE WHEN status='concluido' THEN 1 END) AS cuts,
+                 SUM(CASE WHEN status='faltou' THEN 1 END) AS no_shows,
+                 SUM(CASE WHEN status='agendado' THEN 1 END) AS upcoming,
+                 COUNT(*) AS total
+               FROM appointments WHERE shop_id=? AND start>=?""",
+            (shop_id, week_ago)).fetchone()
+        top = conn.execute(
+            """SELECT p.name, COUNT(*) AS cuts, COALESCE(SUM(a.price),0) AS revenue
+               FROM appointments a JOIN professionals p ON p.id=a.professional_id
+               WHERE a.shop_id=? AND a.status='concluido' AND a.start>=?
+               GROUP BY p.id ORDER BY cuts DESC LIMIT 1""",
+            (shop_id, week_ago)).fetchone()
+        new_clients = conn.execute(
+            "SELECT COUNT(*) AS n FROM clients WHERE shop_id=? AND created_at>=?",
+            (shop_id, week_ago)).fetchone()["n"] if _col_exists(conn, "clients", "created_at") else 0
+        revenue = round(row["revenue"], 2)
+        cuts = row["cuts"] or 0
+        return {
+            "period": "últimos 7 dias",
+            "revenue": revenue,
+            "cuts": cuts,
+            "no_shows": row["no_shows"] or 0,
+            "upcoming": row["upcoming"] or 0,
+            "avg_ticket": round(revenue / cuts, 2) if cuts else 0,
+            "top_professional": dict(top) if top else None,
+            "new_clients": new_clients,
+        }
+
+
+def _col_exists(conn, table: str, col: str) -> bool:
+    return col in [r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+
+
+@app.get("/reports/weekly/message")
+def weekly_report_message(shop_id: int = Depends(current_shop)):
+    """Mensagem pronta do relatório semanal para enviar no WhatsApp do dono."""
+    rep = weekly_report(shop_id)
+    lines = [f"📊 *Resumo da semana* ({rep['period']})", ""]
+    lines.append(f"💰 Receita: *{fmt_brl(rep['revenue'])}*")
+    lines.append(f"✂️ Cortes concluídos: *{rep['cuts']}*")
+    if rep["no_shows"]:
+        lines.append(f"⚠️ Faltas: *{rep['no_shows']}*")
+    if rep["avg_ticket"]:
+        lines.append(f"📈 Ticket médio: *{fmt_brl(rep['avg_ticket'])}*")
+    if rep["top_professional"]:
+        t = rep["top_professional"]
+        lines.append(f"🏆 Destaque: *{t['name']}* — {t['cuts']} cortes, {fmt_brl(t['revenue'])}")
+    if rep["new_clients"]:
+        lines.append(f"🆕 Clientes novos: *{rep['new_clients']}*")
+    if rep["upcoming"]:
+        lines.append(f"📅 Agendados futuros: *{rep['upcoming']}*")
+    return {"message": "\n".join(lines), "report": rep}
+
+
+def fmt_brl(n: float) -> str:
+    s = f"{n:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {s}"
+
+
+# ---------------------------------------------------------------- v0.8: envio automático do relatório (cron interno)
+import threading
+import time as _time
+
+_report_lock = threading.Lock()
+
+
+def _weekly_report_worker():
+    """Todo minuto verifica se é segunda 8h (horário local) e envia o relatório das lojas ativas."""
+    while True:
+        try:
+            now = datetime.now()
+            if now.weekday() == 0 and now.hour == 8 and _report_lock.acquire(blocking=False):
+                try:
+                    with db() as conn:
+                        shops = conn.execute(
+                            "SELECT id, name, owner_email, weekly_report FROM shops WHERE active=1 AND weekly_report=1").fetchall()
+                    for s in shops:
+                        with db() as conn:
+                            last = conn.execute("SELECT last_report_sent FROM shops WHERE id=?", (s["id"],)).fetchone()
+                            if last and last["last_report_sent"] and last["last_report_sent"][:10] == now.date().isoformat():
+                                continue   # já enviou hoje
+                        rep_msg = _report_message_for(s["id"])
+                        sent = _send_email(s["owner_email"], f"BarberHub — resumo da semana ({s['name']})", rep_msg)
+                        with db() as conn:
+                            conn.execute("UPDATE shops SET last_report_sent=? WHERE id=?", (now.isoformat(), s["id"]))
+                        print(f"[RELATÓRIO] loja {s['id']} ({s['name']}): {'email enviado' if sent else 'email indisponível (SMTP não configurado)'}")
+                finally:
+                    _report_lock.release()
+        except Exception as e:
+            print(f"[RELATÓRIO ERRO] {e}")
+        _time.sleep(60)
+
+
+def _report_message_for(shop_id: int) -> str:
+    with db() as conn:
+        week_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        row = conn.execute(
+            """SELECT COALESCE(SUM(CASE WHEN status='concluido' THEN price END),0) AS revenue,
+                      SUM(CASE WHEN status='concluido' THEN 1 END) AS cuts,
+                      SUM(CASE WHEN status='faltou' THEN 1 END) AS no_shows
+               FROM appointments WHERE shop_id=? AND start>=?""", (shop_id, week_ago)).fetchone()
+        top = conn.execute(
+            """SELECT p.name, COUNT(*) AS cuts FROM appointments a JOIN professionals p ON p.id=a.professional_id
+               WHERE a.shop_id=? AND a.status='concluido' AND a.start>=?
+               GROUP BY p.id ORDER BY cuts DESC LIMIT 1""", (shop_id, week_ago)).fetchone()
+    lines = [f"📊 Resumo da semana — {row['cuts'] or 0} cortes concluídos",
+             f"💰 Receita: {fmt_brl(round(row['revenue'], 2))}"]
+    if row["no_shows"]:
+        lines.append(f"⚠️ Faltas: {row['no_shows']}")
+    if top:
+        lines.append(f"🏆 Destaque: {top['name']} ({top['cuts']} cortes)")
+    return "\n".join(lines)
+
+
+_report_thread = threading.Thread(target=_weekly_report_worker, daemon=True)
+_report_thread.start()
+
+
+# ---------------------------------------------------------------- v0.8: comanda/OS em PDF (opcional)
+@app.get("/appointments/{ap_id}/receipt")
+def appointment_receipt(ap_id: int, shop_id: int = Depends(current_shop)):
+    """Gera comanda/ordem de serviço em PDF do agendamento concluído.
+    Uso: dono imprime ou envia ao cliente como comprovante formal do serviço,
+    com itens, valores, profissional e regras de comissão aplicadas.
+    Desligada por padrão — ativar com env var RECEIPTS_ENABLED=1."""
+    if os.environ.get("RECEIPTS_ENABLED", "0") != "1":
+        raise HTTPException(404, "Comandas desativadas — ative com RECEIPTS_ENABLED=1 nas variáveis de ambiente")
+    from reportlab.lib.pagesizes import A6
+    from reportlab.pdfgen import canvas as _canvas
+    import io
+    with db() as conn:
+        ap = _get_scoped(conn, "appointments", ap_id, shop_id, "Agendamento")
+        prof = conn.execute("SELECT name FROM professionals WHERE id=?", (ap["professional_id"],)).fetchone()
+        svc = conn.execute("SELECT name FROM services WHERE id=?", (ap["service_id"],)).fetchone()
+        shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+        cli = conn.execute("SELECT phone FROM clients WHERE id=?", (ap["client_id"],)).fetchone() if ap["client_id"] else None
+        rule = _commission_for(conn, shop_id, ap["professional_id"], ap["service_id"], ap["price"])
+    buf = io.BytesIO()
+    c = _canvas.Canvas(buf, pagesize=A6)
+    w, h = A6
+    y = h - 40
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(30, y, shop["name"][:40]); y -= 18
+    c.setFont("Helvetica", 9)
+    c.drawString(30, y, f"Comanda #{ap['id']:06d}"); y -= 20
+    c.line(30, y, w-30, y); y -= 16
+    c.setFont("Helvetica", 10)
+    c.drawString(30, y, f"Cliente: {ap['client_name'][:30]}"); y -= 14
+    if cli and cli["phone"]:
+        c.drawString(30, y, f"WhatsApp: {cli['phone']}"); y -= 14
+    c.drawString(30, y, f"Profissional: {prof['name']}"); y -= 14
+    c.drawString(30, y, f"Data: {ap['start'][:16].replace('T', ' ')}"); y -= 20
+    c.line(30, y, w-30, y); y -= 16
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(30, y, "Serviço"); c.drawString(w-90, y, "Valor"); y -= 14
+    c.setFont("Helvetica", 10)
+    c.drawString(30, y, svc["name"][:30])
+    c.drawRightString(w-30, y, f"R$ {ap['price']:.2f}"); y -= 20
+    c.line(30, y, w-30, y); y -= 16
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(30, y, "TOTAL")
+    c.drawRightString(w-30, y, f"R$ {ap['price']:.2f}"); y -= 24
+    c.setFont("Helvetica", 8)
+    c.drawString(30, y, f"Comissão do profissional: {fmt_brl(rule['commission'])} ({rule['kind']})"); y -= 12
+    c.drawString(30, y, "Obrigado pela preferência!")
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    from fastapi.responses import Response
+    return Response(buf.getvalue(), media_type="application/pdf",
+                    headers={"Content-Disposition": f"inline; filename=comanda-{ap_id}.pdf"})
 
 
 @app.get("/health")
