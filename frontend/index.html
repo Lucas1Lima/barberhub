@@ -50,7 +50,7 @@ nav{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px
 nav button{background:0;border:0;color:var(--mut);font-size:11px;display:flex;flex-direction:column;align-items:center;gap:3px;cursor:pointer;padding:4px 12px}
 nav button.on{color:var(--gold)}
 nav .ic{font-size:20px}
-.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:var(--green);color:#0f0f1a;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:700;opacity:0;transition:.3s;pointer-events:none;z-index:99}
+.toast{position:fixed;bottom:90px;left:50%;transform:translateX(-50%);background:var(--red);color:#fff;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:700;opacity:0;transition:.3s;pointer-events:none;z-index:300;box-shadow:0 4px 16px rgba(0,0,0,.4)}
 .toast.show{opacity:1}
 /* seletor de data */
 .daybar{display:flex;gap:6px;align-items:center}
@@ -350,6 +350,7 @@ nav .ic{font-size:20px}
       <label id="shopLbl" style="display:none">Nome da barbearia</label>
       <input id="authShop" style="display:none" placeholder="Ex.: Barbearia do Zé">
       <button class="btn" id="authBtn" onclick="doAuth()">Entrar</button>
+      <div id="authError" style="display:none;background:#3b1d1d;border:1px solid var(--red);color:var(--red);padding:10px 12px;border-radius:10px;font-size:13px;font-weight:600;margin-top:12px;text-align:center"></div>
       <button class="btn sec" onclick="toggleAuth()">Criar conta nova</button>
     </div>
   </div>
@@ -427,23 +428,41 @@ async function api(path, opts={}){
 function showLogin(){ document.getElementById('loginScreen').style.display='flex'; }
 function hideLogin(){ document.getElementById('loginScreen').style.display='none'; }
 
+function authError(msg){
+  const el = document.getElementById('authError');
+  if(!msg){ el.style.display='none'; return; }
+  el.textContent = msg; el.style.display = 'block';
+}
+
 async function doAuth(){
   const email = document.getElementById('authEmail').value.trim();
   const pass = document.getElementById('authPass').value;
   const shopName = document.getElementById('authShop').value.trim();
-  if(!email || pass.length < 6) return toast('Preencha email e senha (6+)');
+  authError('');
+  if(!email || pass.length < 6){ authError('Preencha email e senha (mínimo 6 caracteres)'); return; }
   const btn = document.getElementById('authBtn');
   btn.disabled = true;
+  let hadError = false;
   try{
     const path = isRegister ? '/auth/register' : '/auth/login';
     const body = isRegister ? {email, password: pass, shop_name: shopName} : {email, password: pass};
     const r = await fetch(API+path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
-    if(!r.ok){ const e = await r.json().catch(()=>({})); throw new Error(e.detail || 'Erro'); }
+    if(!r.ok){
+      const e = await r.json().catch(()=>({}));
+      hadError = true;
+      throw new Error(e.detail || (r.status===401 ? 'Email ou senha incorretos' : 'Erro '+r.status));
+    }
     const data = await r.json();
     TOKEN = data.token; localStorage.setItem('bh_token', TOKEN);
     await start();
-  }catch(e){ toast(e.message); }
-  finally{ btn.disabled = false; }
+  }catch(e){
+    hadError = true;
+    authError(e.message || 'Email ou senha incorretos');
+  }
+  finally{
+    btn.disabled = false;
+    if(hadError) document.getElementById('authPass').value = '';
+  }
 }
 
 async function start(){
