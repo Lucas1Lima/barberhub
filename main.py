@@ -31,6 +31,7 @@ _FRONTEND_CANDIDATES = [
     os.path.join(os.path.dirname(__file__), "index.html"),
 ]
 _FRONTEND = next((p for p in _FRONTEND_CANDIDATES if os.path.exists(p)), _FRONTEND_CANDIDATES[0])
+_BOOK_PAGE = _FRONTEND.replace("index.html", "book.html")
 _DB_PATH = os.environ.get("BARBERHUB_DB", os.path.join(os.path.dirname(__file__), "barberhub.db"))
 # Secret obrigatório: gera e persiste na 1ª execução; BARBERHUB_SECRET sobrepõe (deploy)
 _SECRET_FILE = os.path.join(os.path.dirname(__file__), ".secret")
@@ -49,20 +50,44 @@ _pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # ---------------------------------------------------------------- database
-@contextmanager
-def db(immediate: bool = False):
-    conn = sqlite3.connect(_DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
-    if immediate:
-        conn.execute("BEGIN IMMEDIATE")   # lock de escrita — evita race no conflito de agenda
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+# Suporte a Postgres (produção) OU SQLite (dev): se DATABASE_URL existir, usa Postgres.
+_DATABASE_URL = os.environ.get("DATABASE_URL", "")
+_IS_PG = _DATABASE_URL.startswith(("postgres://", "postgresql://"))
+
+if _IS_PG:
+    import psycopg2
+    import psycopg2.extras
+    import psycopg2.pool
+
+    _pg_pool = psycopg2.pool.SimpleConnectionPool(1, 10, _DATABASE_URL)
+
+    @contextmanager
+    def db(immediate: bool = False):
+        conn = _pg_pool.getconn()
+        conn.cursor_factory = psycopg2.extras.RealDictCursor
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            _pg_pool.putconn(conn)
+
+    # Postgres não usa PRAGMA nem BEGIN IMMEDIATE (MVCC já resolve a concorrência)
+
+else:
+    @contextmanager
+    def db(immediate: bool = False):
+        conn = sqlite3.connect(_DB_PATH, timeout=10)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        if immediate:
+            conn.execute("BEGIN IMMEDIATE")   # lock de escrita — evita race no conflito de agenda
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
 
 SCHEMA = """
@@ -181,7 +206,16 @@ CREATE TABLE IF NOT EXISTS settings (
 
 def _migrate():
     with db() as conn:
-        conn.executescript(SCHEMA)
+        if _IS_PG:
+            # Postgres: tipos e sintaxe diferentes — DDL adaptado
+            pg_schema = SCHEMA
+            pg_schema = pg_schema.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+            pg_schema = pg_schema.replace("INTEGER PRIMARY KEY REFERENCES", "INTEGER PRIMARY KEY REFERENCES")
+            pg_schema = pg_schema.replace("PRIMARY KEY (shop_id, professional_id, service_id)",
+                                          "PRIMARY KEY (shop_id, professional_id, service_id)")
+            conn.cursor().execute(pg_schema)
+        else:
+            conn.executescript(SCHEMA)
         # migração incremental: data de conclusão + flag de corte grátis (fidelidade)
         cols = [r["name"] for r in conn.execute("PRAGMA table_info(appointments)").fetchall()]
         if "concluded_at" not in cols:
@@ -199,6 +233,8 @@ def _migrate():
         # 1º usuário registrado vira admin automaticamente (se ainda não houver admin)
         if not conn.execute("SELECT 1 FROM shops WHERE is_admin=1").fetchone():
             conn.execute("UPDATE shops SET is_admin=1 WHERE id=(SELECT MIN(id) FROM shops)")
+        # settings default para lojas existentes criadas antes da tabela settings
+        conn.execute("INSERT OR IGNORE INTO settings (shop_id) SELECT id FROM shops")
 
 
 _migrate()
@@ -278,7 +314,11 @@ def me(shop_id: int = Depends(current_shop)):
         row = conn.execute("SELECT id, name, owner_email, is_admin FROM shops WHERE id=?", (shop_id,)).fetchone()
     if not row:
         raise HTTPException(404, "Conta não encontrada")
-    return dict(row)
+    d = dict(row)
+    import unicodedata
+    norm = unicodedata.normalize("NFKD", d["name"]).encode("ascii", "ignore").decode()
+    d["slug"] = f"b{d['id']}-" + re.sub(r"[^a-z0-9]+", "-", norm.lower()).strip("-")
+    return d
 
 
 class ChangeEmailIn(BaseModel):
@@ -1241,6 +1281,111 @@ def mrr_report(shop_id: int = Depends(current_shop)):
         return {"mrr": round(row["mrr"], 2), "active_subscriptions": row["n"]}
 
 
+# ---------------------------------------------------------------- agendamento online (página pública da barbearia)
+@app.get("/public/{slug}")
+def public_info(slug: str):
+    """Dados públicos da barbearia para a página de agendamento online."""
+    with db() as conn:
+        shop = conn.execute("SELECT id, name FROM shops WHERE id=?", (_shop_id_from_slug(conn, slug),)).fetchone()
+        if not shop:
+            raise HTTPException(404, "Barbearia não encontrada")
+        profs = conn.execute("SELECT id, name, role FROM professionals WHERE shop_id=?", (shop["id"],)).fetchall()
+        svcs = conn.execute("SELECT id, name, price, duration_min FROM services WHERE shop_id=?", (shop["id"],)).fetchall()
+        return {"shop": dict(shop), "slug": slug,
+                "professionals": [dict(p) for p in profs],
+                "services": [dict(s) for s in svcs]}
+
+
+def _shop_id_from_slug(conn, slug: str) -> int:
+    """Slug = 'b{id}-{nome}' (ex.: b3-barbearia-do-ze) — imutável e sem tabela extra."""
+    m = re.match(r"b(\d+)-", slug)
+    if not m:
+        raise HTTPException(404, "Barbearia não encontrada")
+    return int(m.group(1))
+
+
+class PublicBookIn(BaseModel):
+    slug: str
+    professional_id: int
+    service_id: int
+    client_name: str = Field(min_length=2)
+    client_phone: str = Field(min_length=10)
+    start: str
+
+
+@app.post("/public/book")
+def public_book(body: PublicBookIn):
+    """Cliente agenda sozinho pela página pública (sem login)."""
+    with db(immediate=True) as conn:
+        shop_id = _shop_id_from_slug(conn, body.slug)
+        shop = conn.execute("SELECT name FROM shops WHERE id=?", (shop_id,)).fetchone()
+        if not shop:
+            raise HTTPException(404, "Barbearia não encontrada")
+        prof = conn.execute("SELECT * FROM professionals WHERE id=? AND shop_id=?", (body.professional_id, shop_id)).fetchone()
+        svc = conn.execute("SELECT * FROM services WHERE id=? AND shop_id=?", (body.service_id, shop_id)).fetchone()
+        if not prof or not svc:
+            raise HTTPException(404, "Profissional ou serviço não encontrado")
+        start = _parse_start(body.start)
+        if start < datetime.now():
+            raise HTTPException(422, "Escolha um horário futuro")
+        _check_conflict(conn, shop_id, body.professional_id, start, svc["duration_min"])
+        b = conn.execute(
+            """SELECT 1 FROM blocks WHERE shop_id=? AND professional_id=? AND day=?
+               AND (?) < end_time AND (?) > start_time""",
+            (shop_id, body.professional_id, start.date().isoformat(),
+             start.strftime("%H:%M"), (start + timedelta(minutes=svc["duration_min"])).strftime("%H:%M"))).fetchone()
+        if b:
+            raise HTTPException(409, "Horário indisponível")
+        # cliente recorrente: acha pelo telefone, senão cria
+        cli = conn.execute("SELECT id FROM clients WHERE shop_id=? AND phone=?",
+                           (shop_id, body.client_phone)).fetchone()
+        client_id = cli["id"] if cli else None
+        if not client_id:
+            cur = conn.execute("INSERT INTO clients (shop_id, name, phone) VALUES (?,?,?)",
+                               (shop_id, body.client_name.strip(), body.client_phone))
+            client_id = cur.lastrowid
+        cur = conn.execute(
+            "INSERT INTO appointments (shop_id, professional_id, service_id, client_id, client_name, start, duration_min, price, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (shop_id, body.professional_id, body.service_id, client_id, body.client_name.strip(),
+             start.isoformat(), svc["duration_min"], svc["price"], "agendado", _now().isoformat()))
+        return {"ok": True, "appointment_id": cur.lastrowid,
+                "shop_name": shop["name"], "when": start.strftime("%d/%m às %H:%M"),
+                "service_name": svc["name"]}
+
+
+@app.get("/public/{slug}/slots")
+def public_slots(slug: str, day: str, professional_id: int):
+    """Horários livres do profissional no dia (para o cliente escolher)."""
+    with db() as conn:
+        shop_id = _shop_id_from_slug(conn, slug)
+        prof = conn.execute("SELECT id FROM professionals WHERE id=? AND shop_id=?", (professional_id, shop_id)).fetchone()
+        if not prof:
+            raise HTTPException(404, "Profissional não encontrado")
+        busy = []
+        rows = conn.execute(
+            "SELECT start, duration_min FROM appointments WHERE shop_id=? AND professional_id=? AND start LIKE ? AND status!='cancelado'",
+            (shop_id, professional_id, day + "%")).fetchall()
+        for r in rows:
+            s = datetime.fromisoformat(r["start"])
+            busy.append((s, s + timedelta(minutes=r["duration_min"])))
+        blocks = conn.execute(
+            "SELECT start_time, end_time FROM blocks WHERE shop_id=? AND professional_id=? AND day=?",
+            (shop_id, professional_id, day)).fetchall()
+        # grade de 30 min, 9h às 20h (padrão do nicho)
+        slots = []
+        base = datetime.fromisoformat(day + "T09:00")
+        for i in range(22):   # 9h → 19h30
+            t = base + timedelta(minutes=30 * i)
+            t_end = t + timedelta(minutes=30)
+            if t < datetime.now():
+                continue
+            t_str = t.strftime("%H:%M")
+            conflict = any(s < t_end and e > t for s, e in busy)
+            blocked = any(b["start_time"] < t_end.strftime("%H:%M") and b["end_time"] > t_str for b in blocks)
+            slots.append({"time": t_str, "free": not conflict and not blocked})
+        return {"day": day, "slots": slots}
+
+
 @app.get("/health")
 def health():
     return {"ok": True}
@@ -1248,4 +1393,14 @@ def health():
 
 @app.get("/")
 def index():
+    return FileResponse(_FRONTEND)
+
+
+@app.get("/book")
+def book_page():
+    return FileResponse(_BOOK_PAGE)
+
+
+@app.get("/reset")
+def reset_page():
     return FileResponse(_FRONTEND)

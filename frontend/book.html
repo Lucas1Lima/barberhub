@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#1a1a2e">
+<title>Agendar — BarberHub</title>
+<style>
+:root{--bg:#0f0f1a;--card:#1a1a2e;--card2:#222240;--line:#2e2e50;--gold:#e8b13a;--green:#3ecf8e;--red:#ff6b6b;--txt:#f0f0f5;--mut:#9a9ab8}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{font-family:-apple-system,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--txt);min-height:100vh;padding:20px 16px}
+.wrap{max-width:480px;margin:0 auto}
+h1{font-size:24px;font-weight:800;text-align:center;margin-bottom:2px}
+h1 span{color:var(--gold)}
+.sub{text-align:center;color:var(--mut);font-size:13px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:12px}
+.card h3{font-size:13px;color:var(--mut);font-weight:600;margin-bottom:10px;text-transform:uppercase;letter-spacing:.5px}
+label{display:block;font-size:12px;color:var(--mut);margin:10px 0 4px}
+input,select{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:var(--card2);color:var(--txt);font-size:15px}
+input:focus,select:focus{outline:none;border-color:var(--gold)}
+.btn{display:block;width:100%;padding:14px;border:0;border-radius:12px;background:var(--gold);color:#1a1a2e;font-size:15px;font-weight:700;cursor:pointer;margin-top:14px}
+.btn.sec{background:var(--card2);color:var(--txt);border:1px solid var(--line)}
+.btn:disabled{opacity:.5;cursor:wait}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{padding:10px 14px;border-radius:10px;background:var(--card2);border:1px solid var(--line);font-size:14px;cursor:pointer;color:var(--txt)}
+.chip.on{background:var(--gold);color:#1a1a2e;border-color:var(--gold);font-weight:700}
+.chip.off{opacity:.3;cursor:not-allowed;text-decoration:line-through}
+.slots{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.slot{padding:10px 0;text-align:center;border-radius:9px;background:var(--card2);border:1px solid var(--line);font-size:14px;cursor:pointer}
+.slot.on{background:var(--gold);color:#1a1a2e;font-weight:700}
+.slot.off{opacity:.25;cursor:not-allowed}
+.ok-box{text-align:center;padding:24px 8px}
+.ok-box .ic{font-size:48px;margin-bottom:8px}
+.ok-box b{font-size:18px;display:block;margin-bottom:6px}
+.ok-box p{color:var(--mut);font-size:14px}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--red);color:#fff;padding:10px 20px;border-radius:24px;font-size:13px;font-weight:700;opacity:0;transition:.3s;pointer-events:none;z-index:99}
+.toast.show{opacity:1}
+.step{display:none}.step.on{display:block}
+.dots{display:flex;justify-content:center;gap:6px;margin:14px 0}
+.dots i{width:8px;height:8px;border-radius:50%;background:var(--line)}
+.dots i.on{background:var(--gold)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="shopTitle">Barber<span>Hub</span></h1>
+  <p class="sub" id="shopSub">Agende seu horário em 30 segundos</p>
+
+  <div class="card" id="mainCard">
+    <div class="dots"><i class="on" id="d1"></i><i id="d2"></i><i id="d3"></i><i id="d4"></i></div>
+
+    <!-- passo 1: serviço -->
+    <div class="step on" id="s1">
+      <h3>1. Escolha o serviço</h3>
+      <div class="chips" id="svcChips"></div>
+      <button class="btn" onclick="next(2)" id="btn1" disabled>Continuar</button>
+    </div>
+
+    <!-- passo 2: profissional -->
+    <div class="step" id="s2">
+      <h3>2. Escolha o profissional</h3>
+      <div class="chips" id="profChips"></div>
+      <button class="btn" onclick="next(3)" id="btn2" disabled>Continuar</button>
+      <button class="btn sec" onclick="next(1)">Voltar</button>
+    </div>
+
+    <!-- passo 3: data e horário -->
+    <div class="step" id="s3">
+      <h3>3. Escolha data e horário</h3>
+      <input type="date" id="dayPick" onchange="loadSlots()">
+      <div class="slots" id="slotGrid" style="margin-top:10px"></div>
+      <button class="btn" onclick="next(4)" id="btn3" disabled>Continuar</button>
+      <button class="btn sec" onclick="next(2)">Voltar</button>
+    </div>
+
+    <!-- passo 4: seus dados -->
+    <div class="step" id="s4">
+      <h3>4. Seus dados</h3>
+      <label>Seu nome</label><input id="fName" placeholder="Ex.: Carlos">
+      <label>Seu WhatsApp</label><input id="fPhone" type="tel" placeholder="(13) 99123-4567">
+      <div class="card" style="margin-top:12px;background:var(--card2)" id="summary"></div>
+      <button class="btn" id="bookBtn" onclick="book()">Confirmar agendamento</button>
+      <button class="btn sec" onclick="next(3)">Voltar</button>
+    </div>
+
+    <!-- sucesso -->
+    <div class="step" id="s5">
+      <div class="ok-box">
+        <div class="ic">✅</div>
+        <b>Agendamento confirmado!</b>
+        <p id="okDetail">—</p>
+        <p style="margin-top:8px">Você vai receber a confirmação no WhatsApp da barbearia.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const slug = new URLSearchParams(location.search).get('s') || location.pathname.split('/').pop();
+let SVC = null, PROF = null, DAY = null, TIME = null;
+let SERVICES = [], PROFS = [];
+
+const fmt = n => 'R$ ' + Number(n).toFixed(2).replace('.', ',');
+function toast(msg){ const t = document.getElementById('toast'); t.textContent = msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'), 2600); }
+function next(n){
+  for(let i=1;i<=5;i++){ document.getElementById('s'+i).classList.remove('on'); document.getElementById('d'+i)?.classList.remove('on'); }
+  document.getElementById('s'+n).classList.add('on');
+  document.getElementById('d'+n)?.classList.add('on');
+  if(n===4) renderSummary();
+}
+
+async function boot(){
+  try{
+    const r = await fetch(`/public/${slug}`);
+    if(!r.ok) throw 0;
+    const d = await r.json();
+    document.getElementById('shopTitle').innerHTML = d.shop.name.replace(/</g,'&lt;');
+    document.title = 'Agendar — ' + d.shop.name;
+    SERVICES = d.services; PROFS = d.professionals;
+    document.getElementById('svcChips').innerHTML = SERVICES.map(s=>
+      `<div class="chip" onclick="pickSvc(${s.id},'${s.name.replace(/'/g,"\\'")}',${s.price})">${s.name.replace(/</g,'&lt;')} · ${fmt(s.price)}</div>`).join('');
+    document.getElementById('profChips').innerHTML = PROFS.map(p=>
+      `<div class="chip" onclick="pickProf(${p.id},'${p.name.replace(/'/g,"\\'")}')">${p.name.replace(/</g,'&lt;')}</div>`).join('');
+    const today = new Date();
+    const iso = today.getFullYear()+'-'+String(today.getMonth()+1).padStart(2,'0')+'-'+String(today.getDate()).padStart(2,'0');
+    document.getElementById('dayPick').value = iso;
+    DAY = iso;
+  }catch(e){
+    document.getElementById('shopSub').textContent = 'Barbearia não encontrada — confira o link.';
+    document.getElementById('mainCard').style.display = 'none';
+  }
+}
+
+function pickSvc(id, name, price){ SVC = {id, name, price};
+  document.querySelectorAll('#svcChips .chip').forEach(c=>c.classList.remove('on'));
+  event.target.classList.add('on'); document.getElementById('btn1').disabled = false; }
+function pickProf(id, name){ PROF = {id, name};
+  document.querySelectorAll('#profChips .chip').forEach(c=>c.classList.remove('on'));
+  event.target.classList.add('on'); document.getElementById('btn2').disabled = false; }
+
+async function loadSlots(){
+  DAY = document.getElementById('dayPick').value;
+  if(!DAY || !PROF) return;
+  const grid = document.getElementById('slotGrid');
+  grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--mut);padding:12px">Carregando…</div>';
+  try{
+    const r = await fetch(`/public/${slug}/slots?day=${DAY}&professional_id=${PROF.id}`);
+    const d = await r.json();
+    grid.innerHTML = d.slots.map(s=>
+      `<div class="slot ${s.free?'':'off'}" ${s.free?`onclick="pickTime('${s.time}',this)"`:''}>${s.time}</div>`).join('');
+  }catch(e){ grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--red)">Erro ao carregar horários</div>'; }
+}
+function pickTime(t, el){
+  TIME = t;
+  document.querySelectorAll('#slotGrid .slot').forEach(s=>s.classList.remove('on'));
+  el.classList.add('on');
+  document.getElementById('btn3').disabled = false;
+}
+
+function renderSummary(){
+  document.getElementById('summary').innerHTML =
+    `<b style="color:var(--gold)">${SVC.name}</b> com <b>${PROF.name}</b><br>${DAY.split('-').reverse().join('/')} às <b>${TIME}</b><br><span style="color:var(--mut)">${fmt(SVC.price)}</span>`;
+}
+
+async function book(){
+  const name = document.getElementById('fName').value.trim();
+  const phone = document.getElementById('fPhone').value.trim();
+  if(name.length < 2) return toast('Informe seu nome');
+  if(phone.replace(/\D/g,'').length < 10) return toast('Informe um WhatsApp válido com DDD');
+  const btn = document.getElementById('bookBtn');
+  btn.disabled = true;
+  try{
+    const r = await fetch('/public/book', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({slug, professional_id:PROF.id, service_id:SVC.id, client_name:name, client_phone:phone, start: DAY+'T'+TIME})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || 'Erro');
+    document.getElementById('okDetail').textContent = `${d.service_name} na ${d.shop_name}, ${d.when}`;
+    next(5);
+  }catch(e){ toast(e.message); }
+  finally{ btn.disabled = false; }
+}
+
+document.getElementById('dayPick').addEventListener('change', ()=>{ document.getElementById('btn3').disabled = true; TIME=null; loadSlots(); });
+if(PROF===null){ /* loadSlots on step enter */ }
+const _next = next;
+next = function(n){ _next(n); if(n===3 && PROF) loadSlots(); };
+boot();
+</script>
+</body>
+</html>

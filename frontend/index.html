@@ -219,6 +219,15 @@ nav .ic{font-size:20px}
       <button class="btn" onclick="changePass()">Salvar senha</button>
     </div>
     <div class="card">
+      <h3>Agendamento online</h3>
+      <p style="font-size:12px;color:var(--mut)">Seus clientes agendam sozinhos por esse link — coloque na bio do Instagram e no WhatsApp:</p>
+      <input id="pubLink" readonly onclick="this.select()" style="margin-top:8px;color:var(--gold)">
+      <div class="row" style="margin-top:10px">
+        <button class="btn sec" onclick="copyPub()">Copiar link</button>
+        <button class="btn sec" onclick="openPub()">Abrir</button>
+      </div>
+    </div>
+    <div class="card">
       <h3>Preferências do negócio</h3>
       <label>Fidelidade: a cada N cortes, 1 grátis</label>
       <input id="setLoyalty" type="number" min="2" max="100" placeholder="10">
@@ -808,8 +817,17 @@ async function loadSettings(){
     const s = await api('/settings');
     document.getElementById('setLoyalty').value = s.loyalty_n;
     document.getElementById('setInactive').value = s.inactive_days;
+    const me = await api('/auth/me');
+    document.getElementById('pubLink').value = `${location.origin}/book?s=${me.slug}`;
   }catch(e){}
 }
+async function copyPub(){
+  const inp = document.getElementById('pubLink');
+  inp.select();
+  try{ await navigator.clipboard.writeText(inp.value); toast('Link copiado!'); }
+  catch(e){ document.execCommand('copy'); toast('Link copiado!'); }
+}
+function openPub(){ window.open(document.getElementById('pubLink').value, '_blank'); }
 async function saveSettings(){
   const loyalty = parseInt(document.getElementById('setLoyalty').value);
   const inactive = parseInt(document.getElementById('setInactive').value);
