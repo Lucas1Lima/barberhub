@@ -23,7 +23,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_FRONTEND = os.path.join(os.path.dirname(__file__), "..", "frontend")
+# Frontend: aceita frontend/index.html (estrutura do repo) ou index.html na raiz
+_FRONTEND_CANDIDATES = [
+    os.path.join(os.path.dirname(__file__), "..", "frontend", "index.html"),
+    os.path.join(os.path.dirname(__file__), "..", "index.html"),
+    os.path.join(os.path.dirname(__file__), "frontend", "index.html"),
+    os.path.join(os.path.dirname(__file__), "index.html"),
+]
+_FRONTEND = next((p for p in _FRONTEND_CANDIDATES if os.path.exists(p)), _FRONTEND_CANDIDATES[0])
 _DB_PATH = os.environ.get("BARBERHUB_DB", os.path.join(os.path.dirname(__file__), "barberhub.db"))
 # Secret obrigatório: gera e persiste na 1ª execução; BARBERHUB_SECRET sobrepõe (deploy)
 _SECRET_FILE = os.path.join(os.path.dirname(__file__), ".secret")
@@ -529,4 +536,4 @@ def health():
 
 @app.get("/")
 def index():
-    return FileResponse(os.path.join(_FRONTEND, "index.html"))
+    return FileResponse(_FRONTEND)
